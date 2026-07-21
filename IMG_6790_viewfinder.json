@@ -25,7 +25,7 @@
       "confidence_details": {
         "confidence_percent": 87.1,
         "signals": {
-          "similarity_concentration": 0.9625,
+          "similarity_strength_and_consistency": 0.9625,
           "geographic_agreement": 0.9986,
           "cross_frame_agreement": null,
           "support_reliability": 0.2835
@@ -50,7 +50,7 @@
       "confidence_details": {
         "confidence_percent": 71.4,
         "signals": {
-          "similarity_concentration": 0.948,
+          "similarity_strength_and_consistency": 0.948,
           "geographic_agreement": 0.5,
           "cross_frame_agreement": null,
           "support_reliability": 0.2835
@@ -77,7 +77,7 @@
       "confidence_details": {
         "confidence_percent": 71.4,
         "signals": {
-          "similarity_concentration": 0.948,
+          "similarity_strength_and_consistency": 0.948,
           "geographic_agreement": 0.5,
           "cross_frame_agreement": null,
           "support_reliability": 0.2835

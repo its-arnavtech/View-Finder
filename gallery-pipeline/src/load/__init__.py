@@ -1,0 +1,2 @@
+"""Versioned FAISS gallery construction."""
+

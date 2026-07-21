@@ -1,0 +1,97 @@
+{
+  "input": "C:\\View-Finder\\alsk.png",
+  "input_type": "image",
+  "prediction": {
+    "latitude": 61.710182,
+    "longitude": -149.23175,
+    "country": "US",
+    "admin1": "Alaska",
+    "city": "Fishhook",
+    "confidence_percent": 74.3,
+    "support_count": 1,
+    "candidate_count": 1
+  },
+  "predictions": [
+    {
+      "rank": 1,
+      "lat": 61.710182,
+      "lon": -149.23175,
+      "confidence": 74.3,
+      "support_count": 1,
+      "candidate_count": 1,
+      "country": "US",
+      "admin1": "Alaska",
+      "city": "Fishhook",
+      "confidence_details": {
+        "confidence_percent": 74.3,
+        "signals": {
+          "similarity_strength_and_consistency": 1.0,
+          "geographic_agreement": 0.5,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    },
+    {
+      "rank": 2,
+      "lat": 60.712941,
+      "lon": -149.380486,
+      "confidence": 46.7,
+      "support_count": 1,
+      "candidate_count": 4,
+      "country": "US",
+      "admin1": "Alaska",
+      "city": "Girdwood",
+      "confidence_details": {
+        "confidence_percent": 46.7,
+        "signals": {
+          "similarity_strength_and_consistency": 0.3375,
+          "geographic_agreement": 0.7973,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    }
+  ],
+  "alternatives": [
+    {
+      "rank": 2,
+      "lat": 60.712941,
+      "lon": -149.380486,
+      "confidence": 46.7,
+      "support_count": 1,
+      "candidate_count": 4,
+      "country": "US",
+      "admin1": "Alaska",
+      "city": "Girdwood",
+      "confidence_details": {
+        "confidence_percent": 46.7,
+        "signals": {
+          "similarity_strength_and_consistency": 0.3375,
+          "geographic_agreement": 0.7973,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    }
+  ],
+  "processing": {
+    "candidates_returned": 5,
+    "clusters_returned": 2
+  }
+}

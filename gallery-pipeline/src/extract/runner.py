@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,11 @@ def select_pending_tiles(config: dict[str, Any], store: CheckpointStore) -> list
 def run_extract(config: dict[str, Any], client: MapillaryClient | None = None) -> dict[str, Any]:
     store = CheckpointStore(config["paths"]["catalog_path"])
     extract = config["extract"]
+    if client is None and os.getenv("GALLERY_EXTRACT_MODE", "live").lower() == "fixture":
+        from src.extract.fixture_client import FixtureMapillaryClient
+
+        client = FixtureMapillaryClient()
+        LOGGER.warning("Fixture extraction mode is active; no Mapillary API requests will be made")
     client = client or MapillaryClient(
         page_size=int(extract.get("page_size", 100)),
         request_timeout=float(extract.get("request_timeout_seconds", 30)),
@@ -55,7 +61,7 @@ def run_extract(config: dict[str, Any], client: MapillaryClient | None = None) -
                 inserted = store.add_image(
                     {
                         **item,
-                        "source": "mapillary",
+                        "source": getattr(client, "source", "mapillary"),
                         "tile_id": tile.tile_id,
                         "raw_file_path": str(raw_path.resolve()),
                         "download_timestamp": utc_now(),
@@ -71,4 +77,3 @@ def run_extract(config: dict[str, Any], client: MapillaryClient | None = None) -
             LOGGER.exception("Extraction failed for tile=%s after %d images", tile.tile_id, found)
             raise
     return {"tile_ids": completed, "tiles_completed": len(completed), "new_images": total_new}
-
