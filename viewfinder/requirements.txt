@@ -1,0 +1,9 @@
+geoclip
+numpy
+opencv-python
+Pillow
+reverse_geocoder==1.5.1
+torch
+# GeoCLIP 1.2.0 expects CLIPModel.get_image_features() to return a Tensor.
+# Transformers 5 returns BaseModelOutputWithPooling and breaks inference.
+transformers<5

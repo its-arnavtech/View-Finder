@@ -1,0 +1,97 @@
+{
+  "input": "C:\\View-Finder\\IMG_6790.png",
+  "input_type": "image",
+  "prediction": {
+    "latitude": 37.89591,
+    "longitude": -122.577528,
+    "country": "US",
+    "admin1": "California",
+    "city": "Mill Valley",
+    "confidence_percent": 87.1,
+    "support_count": 1,
+    "candidate_count": 4
+  },
+  "predictions": [
+    {
+      "rank": 1,
+      "lat": 37.89591,
+      "lon": -122.577528,
+      "confidence": 87.1,
+      "support_count": 1,
+      "candidate_count": 4,
+      "country": "US",
+      "admin1": "California",
+      "city": "Mill Valley",
+      "confidence_details": {
+        "confidence_percent": 87.1,
+        "signals": {
+          "similarity_concentration": 0.9625,
+          "geographic_agreement": 0.9986,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    },
+    {
+      "rank": 2,
+      "lat": 37.667542,
+      "lon": -119.805389,
+      "confidence": 71.4,
+      "support_count": 1,
+      "candidate_count": 1,
+      "country": "US",
+      "admin1": "California",
+      "city": "Midpines",
+      "confidence_details": {
+        "confidence_percent": 71.4,
+        "signals": {
+          "similarity_concentration": 0.948,
+          "geographic_agreement": 0.5,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    }
+  ],
+  "alternatives": [
+    {
+      "rank": 2,
+      "lat": 37.667542,
+      "lon": -119.805389,
+      "confidence": 71.4,
+      "support_count": 1,
+      "candidate_count": 1,
+      "country": "US",
+      "admin1": "California",
+      "city": "Midpines",
+      "confidence_details": {
+        "confidence_percent": 71.4,
+        "signals": {
+          "similarity_concentration": 0.948,
+          "geographic_agreement": 0.5,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    }
+  ],
+  "processing": {
+    "candidates_returned": 5,
+    "clusters_returned": 2
+  }
+}

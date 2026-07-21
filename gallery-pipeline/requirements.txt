@@ -1,0 +1,14 @@
+# Install Apache Airflow with the constraints URL documented in README.md first.
+apache-airflow==2.10.5
+requests>=2.32,<3
+PyYAML>=6.0,<7
+python-dotenv>=1.0,<2
+Pillow>=10.4,<12
+ImageHash>=4.3,<5
+numpy>=1.26,<3
+pyarrow>=17,<20
+faiss-cpu>=1.8,<2
+torch>=2.3,<3
+torchvision>=0.18,<1
+open-clip-torch>=2.26,<3
+

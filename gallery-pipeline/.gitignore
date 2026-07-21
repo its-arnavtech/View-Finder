@@ -1,0 +1,9 @@
+.env
+.airflow/
+data/*
+!data/.gitkeep
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+

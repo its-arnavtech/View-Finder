@@ -1,0 +1,48 @@
+paths:
+  data_dir: data
+
+tiling:
+  # "regions" is the safe development default. Change to "world" for global collection;
+  # max_tiles_per_run makes that crawl incremental and checkpointable.
+  mode: regions
+  world_bounds: [-180.0, -85.0, 180.0, 85.0]
+  cell_size_degrees: 1.0
+  max_tiles_per_run: 6
+  regions:
+    - name: chicago
+      bounds: [-87.75, 41.80, -87.55, 42.00]
+      cell_size_degrees: 0.1
+    - name: swiss_alps
+      bounds: [7.70, 46.40, 8.10, 46.75]
+      cell_size_degrees: 0.2
+    - name: tokyo
+      bounds: [139.60, 35.60, 139.85, 35.80]
+      cell_size_degrees: 0.1
+
+extract:
+  page_size: 100
+  max_images_per_tile: 500
+  request_timeout_seconds: 30
+  min_request_interval_seconds: 0.25
+  max_http_attempts: 6
+  backoff_base_seconds: 1.0
+
+validate:
+  perceptual_hash_distance: 6
+
+transform:
+  max_images_per_tile: 200
+  blur_variance_threshold: 75.0
+  exclude_likely_indoor: true
+  embedding_model: ViT-B-32
+  embedding_pretrained: laion2b_s34b_b79k
+  embedding_batch_size_gpu: 64
+  embedding_batch_size_cpu: 16
+
+quality_check:
+  minimum_total_images: 1
+  # Geographic gaps are warnings by default because development runs intentionally
+  # use a few regions. Set these for a production/global build.
+  expected_regions: []
+  minimum_region_fraction: 0.01
+
