@@ -1,8 +1,16 @@
 """Multi-frame aggregation and confidence scoring.
 
-This module is deliberately free of torch/geoclip imports: it operates on plain
-``Candidate`` records, so it can be reasoned about and tested without loading a
-model.
+This module is deliberately free of torch/geoclip/faiss imports: it operates on
+plain ``Candidate`` records, so it can be reasoned about and tested without
+loading a model.
+
+It is shared by both predictors -- GeoCLIP (:mod:`geolocator`) and image-to-image
+retrieval (:mod:`retrieval_geolocator`) -- so that both produce the same shape of
+ranked result. Scores are normalized per frame against that frame's best
+candidate, which is what makes the two predictors' different score scales
+(softmax probability vs cosine similarity) both usable here without change.
+Results from the two systems are never pooled into one aggregation: they are
+independent predictors and merging them would be misleading.
 
 Two jobs live here:
 
@@ -81,15 +89,36 @@ SUPPORT_PRIOR = 3.0
 
 @dataclass
 class Candidate:
-    """One GPS point retrieved from the model's gallery, with its score."""
+    """One scored coordinate proposed by a predictor.
+
+    Both predictors emit this type. For GeoCLIP the score is a softmax
+    probability over its GPS gallery; for the retrieval predictor it is a cosine
+    similarity against a reference photo. The two scales are never mixed in one
+    aggregation, and :func:`aggregate` normalizes scores per frame anyway, so
+    only the *relative* ordering within a frame matters here.
+    """
 
     lat: float
     lon: float
     score: float
-    """Model similarity score (a softmax probability over the GPS gallery)."""
+    """Predictor-specific similarity score. Higher is better."""
+
+    source_image_id: str | None = None
+    """Reference photo this candidate came from, when the predictor has one.
+
+    Populated by the retrieval predictor, which matches against real gallery
+    photos. GeoCLIP scores coordinates directly and leaves this ``None``.
+    """
 
     def as_dict(self) -> dict[str, Any]:
-        return {"lat": round(self.lat, 6), "lon": round(self.lon, 6), "score": float(self.score)}
+        payload = {
+            "lat": round(self.lat, 6),
+            "lon": round(self.lon, 6),
+            "score": float(self.score),
+        }
+        if self.source_image_id is not None:
+            payload["source_image_id"] = self.source_image_id
+        return payload
 
 
 @dataclass
@@ -358,10 +387,12 @@ def cluster_candidates(
 def similarity_concentration(candidates: Sequence[Candidate]) -> float:
     """Signal (a): how much of the top-k score mass sits on the top-1 candidate.
 
-    GeoCLIP produces a softmax over a ~100k-entry GPS gallery, so the absolute
-    probabilities are tiny and not comparable between images. What *is*
-    comparable is the shape of the top-k tail: a confident prediction puts most
-    of the retained mass on one point, an uncertain one spreads it evenly.
+    Absolute scores are not comparable between images or between predictors:
+    GeoCLIP emits a softmax over a ~100k-entry GPS gallery (so the values are
+    tiny), while the retrieval predictor emits cosine similarities in [-1, 1].
+    What *is* comparable in both cases is the shape of the top-k tail: a
+    confident prediction puts most of the retained mass on one point, an
+    uncertain one spreads it evenly.
 
     The raw share lies in [1/k, 1], so it is rescaled to [0, 1]: an even split
     across the top-k scores 0, all mass on the top-1 scores 1.
@@ -628,7 +659,12 @@ def aggregate(
         frame_best = max(max(candidate.score, 0.0) for candidate in retained)
         denominator = frame_best if frame_best > 0 else 1.0
         for candidate in retained:
-            pooled_candidate = Candidate(candidate.lat, candidate.lon, candidate.score)
+            pooled_candidate = Candidate(
+                candidate.lat,
+                candidate.lon,
+                candidate.score,
+                candidate.source_image_id,
+            )
             pool.append(pooled_candidate)
             evidence[id(pooled_candidate)] = (
                 frame_position,

@@ -70,6 +70,27 @@ def generate_tiles(
         latitude = upper_latitude
 
 
+def subdivide_tile(tile: Tile, factor: int = 2) -> list[Tile]:
+    """Split a tile into `factor`^2 smaller tiles covering the same bounds.
+
+    Used when the Mapillary API rejects a bbox as containing too much data. Image
+    density varies unpredictably even inside one region, so a configured cell size is
+    only a starting point; a rejected cell is retried as smaller cells rather than
+    failing the whole tile.
+
+    The child tile ids are distinct from the parent's because the id encodes the cell
+    size, so children never collide with their parent in the checkpoint table.
+    """
+    if factor < 2:
+        raise ValueError("subdivision factor must be at least 2")
+    width = (Decimal(str(tile.max_lon)) - Decimal(str(tile.min_lon))) / factor
+    height = (Decimal(str(tile.max_lat)) - Decimal(str(tile.min_lat))) / factor
+    step = min(width, height)
+    if step <= 0:
+        return []
+    return list(generate_tiles(tile.bbox, float(step), tile.region))
+
+
 def tiles_from_config(config: dict) -> Iterator[Tile]:
     tiling = config["tiling"]
     if tiling.get("mode", "regions") == "world":

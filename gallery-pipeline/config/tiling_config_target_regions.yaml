@@ -1,0 +1,93 @@
+# Deep-coverage LIVE configuration for named target regions.
+#
+# Purpose: build a denser gallery over specific landscapes that the downstream
+# geolocation CLI is known to mispredict, so the gallery can be validated against
+# real failure cases rather than broad thin global coverage.
+#
+# Select it without editing any code:
+#
+#   export GALLERY_CONFIG=config/tiling_config_target_regions.yaml
+#
+# Writes to its own data_dir, so it never collides with the live-smoke run or the
+# main configuration. Delete data/target-regions/ to reset completely.
+
+paths:
+  data_dir: data/target-regions
+
+tiling:
+  mode: regions
+
+  # Sample regions round-robin instead of in config order. Without this, the first
+  # region listed consumes the whole max_tiles_per_run budget and the second region
+  # is never reached in a bounded run.
+  interleave_regions: true
+
+  max_tiles_per_run: 40
+
+  # Image density varies unpredictably even within a single region, so the per-region
+  # cell sizes below are a starting point, not a guarantee. A cell the API rejects as
+  # too dense is automatically split into subdivision_factor^2 smaller cells and
+  # retried, up to max_subdivision_depth levels (0.03 -> 0.015 -> 0.0075 -> 0.00375).
+  subdivision_factor: 2
+  max_subdivision_depth: 3
+
+  regions:
+    # 1. Avenue of the Giants / Humboldt Redwoods State Park, Humboldt County, CA.
+    #    The old-growth redwood corridor along the Eel River, covering Myers Flat,
+    #    Weott, Founders Grove and the Bull Creek Flats interior.
+    #
+    #    Bounds come from a live 48-cell coverage sweep, not from where the road
+    #    looks like it should be. Mapillary coverage follows the road, which runs
+    #    diagonally NW-SE, so most cells in any rectangle are empty forest; the
+    #    sweep found imagery concentrated in the 40.27-40.33 rows and the eastern
+    #    columns near Myers Flat (-123.90 to -123.84). An earlier bound that stopped
+    #    at -123.90 cut off the Myers Flat imagery and extracted nothing at all.
+    #
+    #    Density is uneven: the sweep found 0.03 accepted almost everywhere but
+    #    REJECTED at (40.30,-123.94) and (40.33,-123.94), which the subdivision
+    #    logic above resolves automatically.
+    - name: avenue_of_giants
+      bounds: [-124.06, 40.27, -123.84, 40.42]
+      cell_size_degrees: 0.03
+
+    # 2. Puget Sound fjords / Hood Canal, Washington.
+    #    The glacially-carved fjord shoreline from Seabeck north past the Great Bend
+    #    to the Hood Canal Bridge.
+    #
+    #    The same live sweep (32 cells) showed this region is genuinely sparse -
+    #    only 6 of 32 cells held any imagery, clustered near the bridge crossing
+    #    (47.80-47.85) and two shoreline pockets. Coverage here follows a handful of
+    #    shoreline roads, so a majority of cells returning nothing is expected and
+    #    cheap: an empty cell costs one API call.
+    #    0.05 was accepted at every sampled anchor, so no subdivision is expected.
+    - name: puget_hood_canal
+      bounds: [-123.00, 47.60, -122.80, 47.90]
+      cell_size_degrees: 0.05
+
+extract:
+  page_size: 25
+  # Cumulative per tile, enforced across interrupted/resumed runs.
+  max_images_per_tile: 25
+  request_timeout_seconds: 60
+  min_request_interval_seconds: 1.0
+  max_http_attempts: 5
+  backoff_base_seconds: 2.0
+
+validate:
+  perceptual_hash_distance: 6
+
+transform:
+  max_images_per_tile: 25
+  blur_variance_threshold: 75.0
+  exclude_likely_indoor: true
+  embedding_model: ViT-B-32
+  embedding_pretrained: laion2b_s34b_b79k
+  embedding_batch_size_gpu: 32
+  embedding_batch_size_cpu: 8
+
+quality_check:
+  minimum_total_images: 1
+  # Both target regions are in North America, so a coverage expectation across
+  # continents would be a meaningless warning here.
+  expected_regions: []
+  minimum_region_fraction: 0.01

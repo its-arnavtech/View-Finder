@@ -133,6 +133,20 @@ class CheckpointStore:
                 (tile_id, status, utc_now(), images_found, error),
             )
 
+    def image_count_for_tile(self, tile_id: str) -> int:
+        """Return how many images are already stored for a tile, across all runs.
+
+        This is the cumulative figure the extraction cap is enforced against, so an
+        interrupted-and-resumed tile cannot exceed `max_images_per_tile` by starting
+        its per-run counter from zero again.
+        """
+        with self.connection() as connection:
+            return int(
+                connection.execute(
+                    "SELECT count(*) FROM images WHERE tile_id = ?", (tile_id,)
+                ).fetchone()[0]
+            )
+
     def image_exists(self, image_id: str) -> bool:
         with self.connection() as connection:
             return connection.execute(

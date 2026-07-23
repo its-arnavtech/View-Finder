@@ -7,7 +7,9 @@ import importlib
 import json
 import logging
 import math
+import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -67,6 +69,42 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="JSON result path (default: INPUT_STEM_viewfinder.json beside input)",
     )
+    parser.add_argument(
+        "--predictor",
+        choices=("geoclip", "retrieval", "both"),
+        default="geoclip",
+        help=(
+            "which geolocation system to run: geoclip (default) uses learned location "
+            "embeddings; retrieval matches against our own scraped reference photos; "
+            "both runs each independently and reports them side by side (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--gallery-path",
+        metavar="PATH",
+        help=(
+            "gallery version directory built by gallery-pipeline's load stage, e.g. "
+            "gallery-pipeline/data/target-regions/gallery/v1 "
+            "(required for --predictor retrieval or both)"
+        ),
+    )
+    parser.add_argument(
+        "--gallery",
+        metavar="PATH",
+        help=(
+            "custom GPS gallery directory or metadata file built by gallery-pipeline "
+            "(default: GeoCLIP's bundled gallery; env: VIEWFINDER_GALLERY)"
+        ),
+    )
+    parser.add_argument(
+        "--gallery-mode",
+        choices=("augment", "replace"),
+        help=(
+            "augment adds the custom coordinates to GeoCLIP's bundled gallery; "
+            "replace restricts predictions to the custom coordinates only "
+            "(default: augment; env: VIEWFINDER_GALLERY_MODE)"
+        ),
+    )
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument(
         "--verbose", "-v", action="store_true", help="enable debug logging for every stage"
@@ -109,6 +147,17 @@ def _validate_args(args: argparse.Namespace) -> tuple[Path, str, Path]:
     if args.max_predictions <= 0:
         raise UserInputError("--max-predictions must be greater than zero")
 
+    if args.predictor in ("retrieval", "both"):
+        if not args.gallery_path:
+            raise UserInputError(
+                f"--predictor {args.predictor} requires --gallery-path pointing at a gallery "
+                "version directory built by gallery-pipeline, "
+                "e.g. --gallery-path gallery-pipeline/data/target-regions/gallery/v1"
+            )
+        gallery_path = Path(args.gallery_path).expanduser().resolve()
+        if not gallery_path.is_dir():
+            raise UserInputError(f"--gallery-path is not a directory: {gallery_path}")
+
     if args.output:
         output_path = Path(args.output).expanduser().resolve()
     else:
@@ -146,9 +195,66 @@ def _stage(name: str, operation: Callable[[], _T], *, hint: str = "") -> _T:
 
 
 def _new_geolocator() -> Any:
-    """Construct GeoCLIP in enforced offline mode."""
+    """Construct GeoCLIP in enforced offline mode.
+
+    Any custom gallery selection is read from the environment, which the CLI
+    flags populate in :func:`run`. This keeps the construction signature stable
+    for both the image and video pipelines.
+    """
     geolocator_class = _import_attr("geolocator", "GeoLocator")
     return geolocator_class(offline=True)
+
+
+def _new_retrieval_geolocator(gallery_path: str) -> Any:
+    """Construct the image-to-image retrieval predictor for one gallery."""
+    retrieval_class = _import_attr("retrieval_geolocator", "RetrievalGeolocator")
+    return retrieval_class(gallery_path)
+
+
+@dataclass(frozen=True)
+class PredictorSpec:
+    """How to build and label one predictor.
+
+    The two predictors are independent systems that happen to share the
+    aggregation and reverse-geocoding stages. Describing them uniformly lets the
+    pipelines run either one without branching on predictor type, while keeping
+    their results strictly separate.
+    """
+
+    key: str
+    label: str
+    build: Callable[[], Any]
+    load_hint: str
+
+
+def _predictor_specs(args: argparse.Namespace) -> list[PredictorSpec]:
+    """Return the predictors selected by --predictor, in report order."""
+    geoclip = PredictorSpec(
+        key="geoclip",
+        label="GeoCLIP",
+        build=_new_geolocator,
+        load_hint=(
+            "Install the requirements and pre-cache the GeoCLIP weights; "
+            "the CLI does not access the network."
+        ),
+    )
+    gallery_path = str(Path(args.gallery_path).expanduser()) if args.gallery_path else ""
+    retrieval = PredictorSpec(
+        key="retrieval",
+        label="Retrieval",
+        build=lambda: _new_retrieval_geolocator(gallery_path),
+        load_hint=(
+            "Confirm --gallery-path points at a gallery version directory containing "
+            "gallery.faiss, metadata.parquet and manifest.json, and that faiss-cpu, "
+            "open-clip-torch and pyarrow are installed."
+        ),
+    )
+
+    if args.predictor == "geoclip":
+        return [geoclip]
+    if args.predictor == "retrieval":
+        return [retrieval]
+    return [geoclip, retrieval]
 
 
 def _candidate_dict(candidate: Any) -> dict[str, float]:
@@ -212,8 +318,13 @@ def _serialize_aggregate(aggregate_result: Any, places: list[dict[str, str]]) ->
     }
 
 
-def _process_image(input_path: Path, top_k: int, max_predictions: int) -> dict[str, Any]:
-    """Run image retrieval, multi-hypothesis clustering, and place lookup."""
+def _process_image(
+    input_path: Path,
+    top_k: int,
+    max_predictions: int,
+    spec: PredictorSpec,
+) -> dict[str, Any]:
+    """Run image prediction, multi-hypothesis clustering, and place lookup."""
     load_image = _stage(
         "Loading image support",
         lambda: _import_attr("video_processor", "load_image"),
@@ -225,20 +336,19 @@ def _process_image(input_path: Path, top_k: int, max_predictions: int) -> dict[s
         hint="Confirm that the file is a valid, readable JPEG or PNG.",
     )
     geolocator = _stage(
-        "Loading GeoCLIP model",
-        _new_geolocator,
-        hint=(
-            "Install the requirements and pre-cache the GeoCLIP weights; "
-            "the CLI does not access the network."
-        ),
+        f"Loading {spec.label} predictor",
+        spec.build,
+        hint=spec.load_hint,
     )
     candidates = _stage(
-        "Analyzing image",
+        f"Analyzing image with {spec.label}",
         lambda: geolocator.predict_image(image, top_k=top_k),
         hint="Try a smaller image or verify that the selected Torch device has enough memory.",
     )
     if not candidates:
-        raise PipelineError("Analyzing image failed: GeoCLIP returned no location candidates.")
+        raise PipelineError(
+            f"Analyzing image failed: {spec.label} returned no location candidates."
+        )
 
     aggregate = _stage(
         "Loading aggregation support",
@@ -271,11 +381,49 @@ def _process_image(input_path: Path, top_k: int, max_predictions: int) -> dict[s
     )
 
     output = _serialize_aggregate(aggregate_result, places)
+    output["predictor"] = spec.key
     output["processing"] = {
         "candidates_returned": len(candidates),
         "clusters_returned": len(aggregate_result.predictions),
     }
+    _attach_gallery_details(output, geolocator, candidates)
     return output
+
+
+def _attach_gallery_details(
+    output: dict[str, Any],
+    geolocator: Any,
+    candidates: Any,
+) -> None:
+    """Record retrieval-specific provenance, when the predictor has any.
+
+    GeoCLIP has no reference gallery, so this is a no-op for it.
+    """
+    info = getattr(geolocator, "info", None)
+    if info is None or not hasattr(info, "as_dict"):
+        return
+    output["gallery"] = info.as_dict()
+    warning = info.warning()
+    if warning:
+        output["warning"] = warning
+
+    matched = _import_attr("retrieval_geolocator", "matched_image_ids")
+    if isinstance(candidates, list) and candidates and not isinstance(candidates[0], list):
+        pool = candidates
+    else:
+        pool = [candidate for frame in candidates for candidate in frame.candidates]
+    output["processing"]["gallery_images_matched"] = len(matched(pool))
+    output["processing"]["gallery_size"] = info.image_count
+
+    # Raw cosine similarity of the single best match. This is deliberately
+    # reported alongside the confidence score because the two answer different
+    # questions: confidence measures how well the returned neighbours agree with
+    # each other, while this measures how much the query actually resembles the
+    # closest reference photo. A tight cluster of poor matches yields high
+    # confidence and a low top similarity, which is the signature of a query
+    # whose true location is simply absent from the gallery.
+    if pool:
+        output["processing"]["top_similarity"] = round(max(c.score for c in pool), 4)
 
 
 def _process_video(
@@ -284,6 +432,7 @@ def _process_video(
     top_k: int,
     max_predictions: int,
     quiet: bool,
+    spec: PredictorSpec,
 ) -> dict[str, Any]:
     """Run frame extraction, batched inference, aggregation, and place lookup."""
     extract_frames = _stage(
@@ -308,22 +457,21 @@ def _process_video(
     )
 
     geolocator = _stage(
-        "Loading GeoCLIP model",
-        _new_geolocator,
-        hint=(
-            "Install the requirements and pre-cache the GeoCLIP weights; "
-            "the CLI does not access the network."
-        ),
+        f"Loading {spec.label} predictor",
+        spec.build,
+        hint=spec.load_hint,
     )
     predictions = _stage(
-        f"Processing {len(frames)} video frames",
+        f"Processing {len(frames)} video frames with {spec.label}",
         lambda: geolocator.predict_frames(frames, top_k=top_k, progress=not quiet),
         hint="Try a lower --fps or verify that the selected Torch device has enough memory.",
     )
     if not predictions:
-        raise PipelineError("GeoCLIP inference produced no frame predictions.")
+        raise PipelineError(f"{spec.label} inference produced no frame predictions.")
     if any(not prediction.candidates for prediction in predictions):
-        raise PipelineError("GeoCLIP inference returned an empty candidate list for a frame.")
+        raise PipelineError(
+            f"{spec.label} inference returned an empty candidate list for a frame."
+        )
 
     aggregate = _stage(
         "Loading aggregation support",
@@ -362,7 +510,9 @@ def _process_video(
         }
     )
     output = _serialize_aggregate(aggregate_result, places)
+    output["predictor"] = spec.key
     output["processing"] = processing
+    _attach_gallery_details(output, geolocator, predictions)
     return output
 
 
@@ -381,14 +531,86 @@ def _place_label(prediction: dict[str, Any]) -> str:
     return ", ".join(str(part) for part in parts if part) or "nearest known place unavailable"
 
 
+PREDICTOR_TITLES = {
+    "geoclip": "GeoCLIP (learned location embeddings; no reference photos)",
+    "retrieval": "Retrieval (nearest match among our own scraped reference photos)",
+}
+
+
 def _print_result(result: dict[str, Any], output_path: Path, *, quiet: bool) -> None:
     """Print either a compact machine-readable result or a human summary."""
+    if "results" in result:
+        _print_comparison(result, output_path, quiet=quiet)
+        return
+    _print_single(result, output_path, quiet=quiet)
+
+
+def _print_comparison(result: dict[str, Any], output_path: Path, *, quiet: bool) -> None:
+    """Print each predictor's result in its own labelled block.
+
+    The two systems are reported separately and never reconciled: where they
+    disagree, that disagreement is the useful signal.
+    """
+    if quiet:
+        print(
+            json.dumps(
+                {key: block["prediction"] for key, block in result["results"].items()},
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        )
+        return
+
+    print("\nView Finder comparison — two independent predictors")
+    for key in result["predictors"]:
+        block = result["results"][key]
+        print(f"\n{'=' * 66}")
+        print(f"  {PREDICTOR_TITLES.get(key, key)}")
+        print("=" * 66)
+        warning = block.get("warning")
+        if warning:
+            print(f"! {warning}")
+        gallery = block.get("gallery")
+        if gallery:
+            print(
+                f"  gallery: v{gallery['version']} — {gallery['image_count']} reference photos"
+                f" — matched {block['processing'].get('gallery_images_matched', 0)}"
+                f" — best match similarity "
+                f"{block['processing'].get('top_similarity', float('nan')):.3f}"
+            )
+        _print_body(block)
+
+    print(f"\n{'=' * 66}")
+    print("Predictions above come from separate systems and are not combined.")
+    print(f"JSON output: {output_path}")
+
+
+def _print_single(result: dict[str, Any], output_path: Path, *, quiet: bool) -> None:
+    """Print the human summary for a single-predictor run."""
     prediction = result["prediction"]
     if quiet:
         print(json.dumps(prediction, ensure_ascii=False, allow_nan=False))
         return
 
     print("\nView Finder result")
+    warning = result.get("warning")
+    if warning:
+        print(f"! {warning}")
+    gallery = result.get("gallery")
+    if gallery:
+        print(
+            f"Gallery:     v{gallery['version']} — {gallery['image_count']} reference photos"
+            f" — matched {result['processing'].get('gallery_images_matched', 0)}"
+            f" — best match similarity "
+            f"{result['processing'].get('top_similarity', float('nan')):.3f}"
+        )
+    _print_body(result)
+    print(f"JSON output: {output_path}")
+
+
+def _print_body(block: dict[str, Any]) -> None:
+    """Print one predictor's primary prediction and its alternatives."""
+    prediction = block["prediction"]
     print(f"Location:    {_place_label(prediction)}")
     print(
         "Coordinates: "
@@ -404,7 +626,7 @@ def _print_result(result: dict[str, Any], output_path: Path, *, quiet: bool) -> 
             f"{prediction['candidate_count']} candidate(s)"
         )
 
-    alternatives = result.get("predictions", [])[1:]
+    alternatives = block.get("predictions", [])[1:]
     if alternatives:
         print("\nAlternative predictions")
         for alternative in alternatives:
@@ -414,7 +636,6 @@ def _print_result(result: dict[str, Any], output_path: Path, *, quiet: bool) -> 
                 f"{alternative['lat']:.6f}, {alternative['lon']:.6f} — "
                 f"support {alternative['support_count']}"
             )
-    print(f"JSON output: {output_path}")
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -423,32 +644,54 @@ def run(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _configure_logging(verbose=args.verbose, quiet=args.quiet)
 
+    # Explicit flags win over the environment; leaving both unset keeps GeoCLIP's
+    # bundled gallery, so default behaviour is unchanged.
+    if args.gallery:
+        os.environ["VIEWFINDER_GALLERY"] = str(Path(args.gallery).expanduser())
+    if args.gallery_mode:
+        os.environ["VIEWFINDER_GALLERY_MODE"] = args.gallery_mode
+
     try:
         input_path, input_type, output_path = _validate_args(args)
         logger.debug("Input type: %s", input_type)
         logger.debug("Input path: %s", input_path)
         logger.debug("Output path: %s", output_path)
 
-        if input_type == "image":
-            pipeline_result = _process_image(
-                input_path,
-                args.top_k,
-                args.max_predictions,
-            )
-        else:
-            pipeline_result = _process_video(
-                input_path,
-                args.fps,
-                args.top_k,
-                args.max_predictions,
-                args.quiet,
-            )
+        specs = _predictor_specs(args)
+        # Each predictor runs as a fully independent system over the same input.
+        # Their outputs are kept in separate blocks and never merged or averaged:
+        # they use different models and different evidence, so a combined number
+        # would not mean anything.
+        outputs: dict[str, dict[str, Any]] = {}
+        for spec in specs:
+            if input_type == "image":
+                outputs[spec.key] = _process_image(
+                    input_path,
+                    args.top_k,
+                    args.max_predictions,
+                    spec,
+                )
+            else:
+                outputs[spec.key] = _process_video(
+                    input_path,
+                    args.fps,
+                    args.top_k,
+                    args.max_predictions,
+                    args.quiet,
+                    spec,
+                )
 
         result = {
             "input": str(input_path),
             "input_type": input_type,
-            **pipeline_result,
         }
+        if len(specs) == 1:
+            # Single-predictor runs keep the original flat shape, so existing
+            # consumers of the JSON are unaffected.
+            result.update(outputs[specs[0].key])
+        else:
+            result["predictors"] = [spec.key for spec in specs]
+            result["results"] = outputs
         _stage(
             "Writing JSON result",
             lambda: _write_result(output_path, result),

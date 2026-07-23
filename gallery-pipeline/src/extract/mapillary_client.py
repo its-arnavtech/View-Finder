@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import re
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -16,6 +17,16 @@ from src.extract.tiling import Tile
 
 LOGGER = logging.getLogger(__name__)
 GRAPH_IMAGES_URL = "https://graph.mapillary.com/images"
+
+# Mapillary's own `paging.next` cursors carry ?access_token=... even when the request
+# was authenticated by header, so any URL echoed into an exception or log line must be
+# scrubbed. Matches both raw and percent-encoded pipe separators.
+_TOKEN_QUERY = re.compile(r"(access_token=)[^&\s]+", re.IGNORECASE)
+
+
+def redact(text: str) -> str:
+    """Replace any access token embedded in a URL or message with a placeholder."""
+    return _TOKEN_QUERY.sub(r"\1<redacted>", str(text))
 
 
 class MapillaryClient:
@@ -39,6 +50,11 @@ class MapillaryClient:
         self.max_attempts = max_attempts
         self.backoff_base = backoff_base
         self.session = session or requests.Session()
+        # Authenticate with a header rather than an ?access_token= query parameter.
+        # requests embeds the full URL in HTTPError messages, so a query-string token
+        # leaks verbatim into tracebacks, Airflow task logs and any error tracker the
+        # moment the API returns a non-2xx status.
+        self.session.headers.update({"Authorization": f"OAuth {self.access_token}"})
         self._last_request_at = 0.0
 
     def _wait_for_rate_limit(self) -> None:
@@ -46,25 +62,50 @@ class MapillaryClient:
         if elapsed < self.min_request_interval:
             time.sleep(self.min_request_interval - elapsed)
 
+    @staticmethod
+    def _raise_for_status(response: requests.Response) -> None:
+        """raise_for_status, but with any access token scrubbed from the message.
+
+        requests builds its HTTPError message from the full request URL, which for
+        paging cursors contains the caller's token.
+        """
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            # Surface the API's own error text: Mapillary returns 500 both for real
+            # outages and for "too much data" density rejections, and only the body
+            # distinguishes them.
+            detail = ""
+            try:
+                error = response.json().get("error", {})
+                message = error.get("message")
+                if message:
+                    detail = f" | {message}"
+            except ValueError:
+                pass
+            raise requests.HTTPError(
+                redact(f"{exc}{detail}"), response=exc.response, request=exc.request
+            ) from None
+
     def _request(self, url: str, **kwargs: Any) -> requests.Response:
         for attempt in range(1, self.max_attempts + 1):
             self._wait_for_rate_limit()
             try:
                 response = self.session.get(url, timeout=self.request_timeout, **kwargs)
                 self._last_request_at = time.monotonic()
-            except requests.RequestException:
+            except requests.RequestException as exc:
                 if attempt == self.max_attempts:
-                    raise
+                    raise type(exc)(redact(exc)) from None
                 delay = self.backoff_base * (2 ** (attempt - 1)) + random.uniform(0, 0.25)
                 LOGGER.warning("Mapillary request failed; retrying in %.2fs (attempt %d/%d)", delay, attempt, self.max_attempts)
                 time.sleep(delay)
                 continue
 
             if response.status_code not in {429, 500, 502, 503, 504}:
-                response.raise_for_status()
+                self._raise_for_status(response)
                 return response
             if attempt == self.max_attempts:
-                response.raise_for_status()
+                self._raise_for_status(response)
             retry_after = response.headers.get("Retry-After")
             delay = float(retry_after) if retry_after and retry_after.isdigit() else self.backoff_base * (2 ** (attempt - 1))
             delay += random.uniform(0, 0.25)
@@ -74,7 +115,6 @@ class MapillaryClient:
 
     def iter_images(self, tile: Tile, max_images: int | None = None) -> Iterator[dict[str, Any]]:
         params: dict[str, Any] | None = {
-            "access_token": self.access_token,
             "fields": "id,geometry,thumb_original_url,captured_at",
             "bbox": ",".join(str(value) for value in tile.bbox),
             "limit": self.page_size,
@@ -106,7 +146,10 @@ class MapillaryClient:
         destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_suffix(destination.suffix + ".part")
-        response = self._request(url, stream=True)
+        # thumb_original_url is a pre-signed CDN link that needs no credentials of ours;
+        # suppress the session's Authorization header so the token is never sent to a
+        # third-party host.
+        response = self._request(url, stream=True, headers={"Authorization": None})
         with temporary.open("wb") as handle:
             for chunk in response.iter_content(chunk_size=1024 * 128):
                 if chunk:

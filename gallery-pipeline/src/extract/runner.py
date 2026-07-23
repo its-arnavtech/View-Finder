@@ -4,27 +4,54 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import deque
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 
+import requests
+
 from src.extract.checkpoint_store import CheckpointStore, utc_now
 from src.extract.mapillary_client import MapillaryClient
-from src.extract.tiling import Tile, tiles_from_config
+from src.extract.tiling import Tile, subdivide_tile, tiles_from_config
 
 
 LOGGER = logging.getLogger(__name__)
+
+# A bbox holding more images than the API will serve is refused with HTTP 500 and this
+# text. The status alone is ambiguous (real outages are also 500), so the body decides
+# whether the right response is "subdivide" or "fail".
+DENSITY_REJECTION_MARKER = "reduce the amount of data"
+
+
+def _is_density_rejection(exc: Exception) -> bool:
+    """True when the API refused a bbox for holding too many images."""
+    if not isinstance(exc, requests.HTTPError):
+        return False
+    response = getattr(exc, "response", None)
+    if response is None or response.status_code != 500:
+        return False
+    return DENSITY_REJECTION_MARKER in str(exc).lower()
 
 
 def select_pending_tiles(config: dict[str, Any], store: CheckpointStore) -> list[Tile]:
     completed = store.completed_tile_ids()
     maximum = int(config["tiling"].get("max_tiles_per_run", 6))
-    pending: list[Tile] = []
-    for tile in tiles_from_config(config):
-        if tile.tile_id not in completed:
-            pending.append(tile)
-        if len(pending) >= maximum:
-            break
-    return pending
+    candidates = [tile for tile in tiles_from_config(config) if tile.tile_id not in completed]
+
+    if config["tiling"].get("interleave_regions", False):
+        # Take tiles round-robin across regions so a run bounded by max_tiles_per_run
+        # samples every configured region. In config order, a region listed first can
+        # otherwise consume the entire budget and later regions are never reached.
+        by_region: dict[str, list[Tile]] = {}
+        for tile in candidates:
+            by_region.setdefault(tile.region, []).append(tile)
+        interleaved: list[Tile] = []
+        for group in zip_longest(*by_region.values()):
+            interleaved.extend(tile for tile in group if tile is not None)
+        candidates = interleaved
+
+    return candidates[:maximum]
 
 
 def run_extract(config: dict[str, Any], client: MapillaryClient | None = None) -> dict[str, Any]:
@@ -45,13 +72,37 @@ def run_extract(config: dict[str, Any], client: MapillaryClient | None = None) -
     selected = select_pending_tiles(config, store)
     completed: list[str] = []
     total_new = 0
-    for tile in selected:
+    cap = int(extract.get("max_images_per_tile", 500))
+    max_depth = int(config["tiling"].get("max_subdivision_depth", 3))
+    subdivision_factor = int(config["tiling"].get("subdivision_factor", 2))
+    subdivisions: list[dict[str, Any]] = []
+
+    # A queue rather than a plain loop: a tile the API rejects as too dense is replaced
+    # by its children, which are processed in this same run.
+    queue: deque[tuple[Tile, int]] = deque((tile, 0) for tile in selected)
+    while queue:
+        tile, depth = queue.popleft()
         found = 0
         new_count = 0
+        # The cap is cumulative across runs, not per-run. Mapillary's paging is not
+        # stably ordered, so a tile that was interrupted and resumed re-queries from
+        # page 1 and can return a different sample; counting only this run's images
+        # would let the tile grow past the cap on every resume.
+        stored = store.image_count_for_tile(tile.tile_id)
+        if stored >= cap:
+            # Already satisfied by earlier runs - complete it without any API call.
+            store.mark_tile(tile.tile_id, "completed", stored)
+            completed.append(tile.tile_id)
+            LOGGER.info("Tile=%s already at cap (%d/%d); skipping extraction", tile.tile_id, stored, cap)
+            continue
+
         store.mark_tile(tile.tile_id, "in_progress")
-        LOGGER.info("Extracting tile=%s bbox=%s", tile.tile_id, tile.bbox)
+        LOGGER.info("Extracting tile=%s bbox=%s stored=%d cap=%d", tile.tile_id, tile.bbox, stored, cap)
         try:
-            for item in client.iter_images(tile, int(extract.get("max_images_per_tile", 500))):
+            # Worst case the API replays every already-stored image before yielding a
+            # new one, so `cap` yields is exactly the budget needed to reach the cap,
+            # and it also bounds paging on a tile whose pages are mostly duplicates.
+            for item in client.iter_images(tile, cap):
                 found += 1
                 raw_path = Path(config["paths"]["raw_dir"]) / tile.tile_id / f"{item['image_id']}.jpg"
                 if store.image_exists(item["image_id"]):
@@ -68,12 +119,53 @@ def run_extract(config: dict[str, Any], client: MapillaryClient | None = None) -
                     }
                 )
                 new_count += int(inserted)
-            store.mark_tile(tile.tile_id, "completed", found)
+                if stored + new_count >= cap:
+                    # Stop consuming the generator: no further pages are requested.
+                    LOGGER.info("Tile=%s reached cap %d; stopping extraction early", tile.tile_id, cap)
+                    break
+            total_stored = stored + new_count
+            store.mark_tile(tile.tile_id, "completed", total_stored)
             completed.append(tile.tile_id)
             total_new += new_count
-            LOGGER.info("Completed tile=%s images_found=%d new_images=%d", tile.tile_id, found, new_count)
+            LOGGER.info(
+                "Completed tile=%s images_seen=%d new_images=%d total_stored=%d cap=%d",
+                tile.tile_id, found, new_count, total_stored, cap,
+            )
         except Exception as exc:
+            total_new += new_count  # partial work is already committed and durable
+            if _is_density_rejection(exc) and depth < max_depth:
+                children = subdivide_tile(tile, subdivision_factor)
+                if children:
+                    # Not a failure: the bbox simply holds more imagery than the API
+                    # will serve. Retry it as smaller cells in this same run.
+                    store.mark_tile(
+                        tile.tile_id, "failed", found,
+                        f"subdivided into {len(children)} cells (too dense at depth {depth})",
+                    )
+                    queue.extendleft((child, depth + 1) for child in reversed(children))
+                    subdivisions.append(
+                        {
+                            "tile_id": tile.tile_id,
+                            "bbox": list(tile.bbox),
+                            "depth": depth,
+                            "children": len(children),
+                            "child_cell_size": round(
+                                (children[0].max_lon - children[0].min_lon), 6
+                            ),
+                        }
+                    )
+                    LOGGER.warning(
+                        "Tile=%s too dense at depth %d; subdivided into %d cells of ~%.4f deg",
+                        tile.tile_id, depth, len(children),
+                        children[0].max_lon - children[0].min_lon,
+                    )
+                    continue
             store.mark_tile(tile.tile_id, "failed", found, str(exc)[:1000])
             LOGGER.exception("Extraction failed for tile=%s after %d images", tile.tile_id, found)
             raise
-    return {"tile_ids": completed, "tiles_completed": len(completed), "new_images": total_new}
+    return {
+        "tile_ids": completed,
+        "tiles_completed": len(completed),
+        "new_images": total_new,
+        "subdivisions": subdivisions,
+    }

@@ -8,16 +8,24 @@ tiling:
   world_bounds: [-180.0, -85.0, 180.0, 85.0]
   cell_size_degrees: 1.0
   max_tiles_per_run: 6
+  # Per-region cell sizes are capped by a live Mapillary Graph API constraint: a bbox
+  # containing too many images is rejected with HTTP 500 ("Please reduce the amount of
+  # data you're asking for") *before* the `limit` parameter is applied, so a smaller
+  # page_size does not help - only a smaller bbox does. The ceiling therefore scales
+  # with image density, and these values were measured against the live API:
+  #   dense metro (Tokyo)        0.01 deg
+  #   large metro (Chicago)      0.02 deg
+  #   sparse terrain (the Alps)  0.05 deg
   regions:
     - name: chicago
       bounds: [-87.75, 41.80, -87.55, 42.00]
-      cell_size_degrees: 0.1
+      cell_size_degrees: 0.02
     - name: swiss_alps
       bounds: [7.70, 46.40, 8.10, 46.75]
-      cell_size_degrees: 0.2
+      cell_size_degrees: 0.05
     - name: tokyo
       bounds: [139.60, 35.60, 139.85, 35.80]
-      cell_size_degrees: 0.1
+      cell_size_degrees: 0.01
 
 extract:
   page_size: 100

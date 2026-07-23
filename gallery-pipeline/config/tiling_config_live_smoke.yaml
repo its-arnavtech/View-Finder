@@ -1,0 +1,56 @@
+# Minimal LIVE configuration for the first real end-to-end run.
+#
+# Purpose: exercise the full extract -> validate -> transform -> load -> quality_check
+# path against the real Mapillary API on a handful of tiles, cheaply and quickly.
+# Select it without editing any code:
+#
+#   export GALLERY_CONFIG=config/tiling_config_live_smoke.yaml
+#
+# Writes to its own data_dir so a smoke run never mixes with production catalog/gallery
+# state. Delete data/live-smoke/ to reset the run completely.
+
+paths:
+  data_dir: data/live-smoke
+
+tiling:
+  mode: regions
+  # 3 tiles of 0.01 deg across the Chicago Loop, ~25 images available in each.
+  # The Loop is dense enough that 0.02 is already rejected as too much data, so it
+  # needs a finer cell than the 0.02 that works elsewhere in Chicago - see the
+  # measurement note in tiling_config.yaml.
+  cell_size_degrees: 0.01
+  max_tiles_per_run: 3
+  regions:
+    - name: chicago_loop
+      bounds: [-87.65, 41.87, -87.62, 41.89]
+      cell_size_degrees: 0.01
+
+extract:
+  page_size: 25
+  # Small but enough that validate/transform have real work to do and the perceptual
+  # -hash dedup and blur filters are genuinely exercised.
+  max_images_per_tile: 25
+  request_timeout_seconds: 60
+  # The live API throttles aggressively; 1 req/s keeps a smoke run well inside limits.
+  min_request_interval_seconds: 1.0
+  max_http_attempts: 5
+  backoff_base_seconds: 2.0
+
+validate:
+  perceptual_hash_distance: 6
+
+transform:
+  max_images_per_tile: 25
+  blur_variance_threshold: 75.0
+  exclude_likely_indoor: true
+  embedding_model: ViT-B-32
+  embedding_pretrained: laion2b_s34b_b79k
+  embedding_batch_size_gpu: 32
+  embedding_batch_size_cpu: 8
+
+quality_check:
+  minimum_total_images: 1
+  # A single-city smoke run is intentionally not globally distributed, so leave the
+  # expected-region coverage check empty to avoid a meaningless warning.
+  expected_regions: []
+  minimum_region_fraction: 0.01

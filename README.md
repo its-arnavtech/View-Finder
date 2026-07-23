@@ -1,13 +1,51 @@
 # View Finder
 
 View Finder is a local Python CLI that estimates where a travel or landscape
-photo or video was captured. It uses GeoCLIP to compare scenery cues such as
-architecture, signage, vegetation, and terrain with a geographic gallery. It
-does not identify people.
+photo or video was captured, by comparing scenery cues such as architecture,
+signage, vegetation, and terrain. It does not identify people.
 
 Inference is offline. The CLI forces Hugging Face/Transformers offline mode,
-and place names come from `reverse_geocoder`'s bundled dataset. GeoCLIP's model
-weights must therefore be downloaded and cached once during setup.
+and place names come from `reverse_geocoder`'s bundled dataset. Model weights
+must therefore be downloaded and cached once during setup.
+
+## Two independent predictors
+
+View Finder ships two geolocation systems. They are genuinely separate
+approaches, not variants of one another, and `--predictor` selects between
+them.
+
+### `geoclip` (default)
+
+The query image is embedded, and that embedding is compared against **learned
+location embeddings** generated from raw GPS coordinates. No photograph of the
+place is involved at any stage: the model has internalised what locations look
+like during training. Its consequence is that GeoCLIP can only ever answer with
+a coordinate present in its GPS gallery — the bundled gallery holds ~100k points
+spread worldwide, so a remote area may have no nearby entry and the prediction
+gets snapped to the closest one that exists.
+
+### `retrieval`
+
+The query image is embedded with OpenCLIP and matched by nearest-neighbour
+search against the embeddings of **other real photographs** whose coordinates we
+know — reference photos scraped from Mapillary and indexed by this project's own
+`gallery-pipeline` ETL. A prediction means "this looks like that specific photo,
+which was taken here". This path is end-to-end ours: our scraped photos, our
+embeddings, our FAISS index.
+
+**The retrieval predictor is currently experimental.** A retrieval system can
+only ever propose a location it holds a reference photo for. The current
+galleries contain only a few hundred images covering a handful of regions, so a
+query from anywhere else *cannot* be answered correctly — the nearest neighbour
+will be whichever gallery photo looks most similar, and its coordinates will be
+confidently wrong. This is structural, and the confidence score cannot detect
+it: the score measures agreement among the returned neighbours, and neighbours
+drawn from a tiny gallery can agree strongly while all being wrong. The CLI
+prints a warning whenever the selected gallery holds fewer than 1000 photos.
+
+The two systems are never merged or averaged. With `--predictor both` they run
+independently and both results are reported side by side; where they disagree,
+that disagreement is the useful signal.
 
 ## Requirements
 
@@ -37,6 +75,15 @@ After that setup step, normal CLI runs do not make network calls. If the model
 is not cached, the CLI exits with an actionable error instead of downloading it
 silently.
 
+The retrieval predictor additionally needs `faiss-cpu`, `open-clip-torch`, and
+`pyarrow`, plus a one-time cache of the OpenCLIP checkpoint that built the
+gallery:
+
+```powershell
+python -m pip install faiss-cpu open-clip-torch pyarrow
+python -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')"
+```
+
 ## Usage
 
 Analyze an image:
@@ -63,17 +110,49 @@ Produce only the final prediction on stdout (as one JSON line):
 python -m viewfinder.main --input .\clips\panorama.mp4 --quiet
 ```
 
+Use the retrieval predictor against a gallery built by `gallery-pipeline`:
+
+```powershell
+python -m viewfinder.main --input .\photos\redwoods.jpg --predictor retrieval --gallery-path .\gallery-pipeline\data\target-regions\gallery\v1
+```
+
+Run both systems and compare them side by side:
+
+```powershell
+python -m viewfinder.main --input .\photos\redwoods.jpg --predictor both --gallery-path .\gallery-pipeline\data\target-regions\gallery\v1
+```
+
 CLI options:
 
 ```text
 --input PATH       Required image or video path
+--predictor NAME   geoclip (default) | retrieval | both
+--gallery-path PATH  Gallery version directory; required for retrieval/both
 --fps FLOAT        Video sampling rate; default 1.0
 --top-k INT        Ranked candidates retained/reported; default 5
+                   (also the k for the retrieval nearest-neighbour search)
 --max-predictions INT  Distinct location clusters returned; default 5
 --output PATH      JSON path; defaults beside the input file
+--gallery PATH     Optional custom GPS gallery for GeoCLIP (see below)
+--gallery-mode M   augment (default) | replace, for --gallery
 --verbose, -v      Debug logging for pipeline stages
 --quiet, -q        No progress logging; print only the final prediction
 ```
+
+`--gallery-path` must point at a gallery **version** directory produced by
+`gallery-pipeline`'s load stage, containing `gallery.faiss`,
+`metadata.parquet`, and `manifest.json`. Omitting it with
+`--predictor retrieval` or `--predictor both` is an error (exit `2`).
+
+The query encoder is read from the gallery's own `manifest.json` rather than
+hardcoded, so a gallery is always searched with the model that built it. A
+mismatch between query and gallery embedding spaces would make retrieval
+meaningless, so a gallery built with a non-OpenCLIP encoder is rejected
+outright.
+
+Note `--gallery`/`--gallery-mode` are a separate, GeoCLIP-only feature: they
+extend GeoCLIP's *coordinate* pool with coordinates harvested by the pipeline.
+That is unrelated to `--predictor retrieval`, which does not use GeoCLIP at all.
 
 Supported images are `.jpg`, `.jpeg`, and `.png`. Supported videos are `.mp4`,
 `.mov`, `.avi`, and `.mkv`. Format detection is extension-based and
@@ -81,9 +160,16 @@ case-insensitive.
 
 ## Pipeline
 
-For an image, View Finder loads and orients the image, retrieves ranked GeoCLIP
-coordinates, geographically clusters the top-k results, independently scores
-each distinct location hypothesis, and reverse-geocodes every returned cluster.
+For an image, View Finder loads and orients the image, obtains ranked
+coordinates from the selected predictor, geographically clusters the top-k
+results, independently scores each distinct location hypothesis, and
+reverse-geocodes every returned cluster.
+
+Both predictors share the clustering, confidence scoring, and reverse-geocoding
+stages, so they produce the same shape of ranked result. Scores are normalised
+per frame against that frame's best candidate, which is what lets GeoCLIP's
+softmax probabilities and retrieval's cosine similarities both flow through the
+same scoring code unchanged.
 
 For a video, it samples at the requested rate, rejects blurry and near-duplicate
 frames, runs GeoCLIP in batches, and applies connected-component clustering with
@@ -165,6 +251,51 @@ Unless `--output` is supplied, `photo.jpg` produces
   }
 }
 ```
+
+With `--predictor both`, the top level instead holds a `predictors` list and a
+`results` object keyed by predictor name, each containing the same structure
+shown above. The blocks are kept strictly separate — nothing is merged or
+averaged across the two systems:
+
+```json
+{
+  "input": "C:\\photos\\redwoods.jpg",
+  "input_type": "image",
+  "predictors": ["geoclip", "retrieval"],
+  "results": {
+    "geoclip": { "predictor": "geoclip", "prediction": {}, "predictions": [] },
+    "retrieval": {
+      "predictor": "retrieval",
+      "prediction": {},
+      "predictions": [],
+      "warning": "EXPERIMENTAL: the retrieval gallery holds only 299 reference photos ...",
+      "gallery": {
+        "version": 1,
+        "image_count": 299,
+        "embedding_model": "open_clip:ViT-B-32:laion2b_s34b_b79k",
+        "experimental": true
+      },
+      "processing": { "gallery_images_matched": 5, "gallery_size": 299 }
+    }
+  }
+}
+```
+
+Retrieval candidates additionally carry `source_image_id`, the gallery photo
+each match came from, so a prediction can be traced back to the reference
+photograph that produced it.
+
+Retrieval runs also report `top_similarity`, the raw cosine similarity of the
+single best match. **Read it alongside the confidence score, not instead of
+it** — the two answer different questions. Confidence measures how well the
+returned neighbours agree with each other; `top_similarity` measures how much
+the query actually resembles the closest reference photo. A high confidence
+paired with a low `top_similarity` is the signature of a query whose true
+location is absent from the gallery: the neighbours agree because they all come
+from the same small region, not because they are right.
+
+Single-predictor runs (including the default) keep the flat shape shown
+earlier, so existing consumers of the JSON are unaffected.
 
 `prediction` remains the highest-confidence result for compatibility with
 single-answer consumers. `predictions` contains every ranked cluster up to

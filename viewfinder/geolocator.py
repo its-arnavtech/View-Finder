@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Sequence
+from pathlib import Path
+from typing import Any, Sequence
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -38,6 +40,16 @@ from .aggregator import Candidate, FramePrediction
 logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+
+# Optional custom GPS gallery, selectable without code changes.
+GALLERY_ENV = "VIEWFINDER_GALLERY"
+GALLERY_MODE_ENV = "VIEWFINDER_GALLERY_MODE"
+GALLERY_MODES = ("augment", "replace")
+DEFAULT_GALLERY_MODE = "augment"
+
+# Coordinates closer than this are treated as the same gallery entry when merging.
+# 5 decimal places is ~1 m, far finer than the retrieval task needs.
+_COORD_DECIMALS = 5
 
 # Frames encoded per forward pass. CLIP ViT-L/14 at 224x224 is ~0.3 GB of
 # activations per 8 frames on CPU, which keeps memory bounded on modest
@@ -63,10 +75,105 @@ def resolve_device(requested: str | None = None) -> str:
     return "cpu"
 
 
+def load_gallery_coordinates(path: str | os.PathLike[str]) -> np.ndarray:
+    """Load ``(lat, lon)`` pairs from a gallery built by the gallery-pipeline.
+
+    Accepts a version directory (``.../gallery/v2``), a ``metadata.parquet``
+    file, or a CSV with ``lat``/``lon`` columns.
+
+    Only the *coordinates* are read, not the FAISS vectors. GeoCLIP scores a
+    query image against embeddings of GPS coordinates produced by its own
+    location encoder, so it can only ever predict a location that exists in its
+    gallery. The pipeline's ``gallery.faiss`` holds OpenCLIP ViT-B-32 *image*
+    embeddings, which live in a different vector space from GeoCLIP's CLIP
+    ViT-L/14 image tower and are not comparable to it -- feeding them into
+    GeoCLIP would produce meaningless similarities. What transfers usefully is
+    the set of real, densely-sampled coordinates the pipeline discovered, which
+    widens the set of places GeoCLIP is able to answer with.
+
+    Args:
+        path: Version directory, parquet file, or CSV file.
+
+    Returns:
+        Array of shape ``(n, 2)`` holding latitude and longitude.
+
+    Raises:
+        FileNotFoundError: If no readable metadata file is found.
+        ValueError: If the file has no usable coordinate columns or no rows.
+    """
+    source = Path(path).expanduser()
+    if source.is_dir():
+        for candidate in ("metadata.parquet", "metadata.csv", "coordinates.csv"):
+            if (source / candidate).is_file():
+                source = source / candidate
+                break
+        else:
+            raise FileNotFoundError(
+                f"No metadata.parquet or metadata.csv found in gallery directory: {source}"
+            )
+    if not source.is_file():
+        raise FileNotFoundError(f"Gallery metadata not found: {source}")
+
+    if source.suffix.lower() == ".parquet":
+        try:
+            import pyarrow.parquet as pq
+        except ImportError as exc:  # pragma: no cover - depends on environment
+            raise RuntimeError(
+                "Reading a .parquet gallery requires pyarrow (pip install pyarrow), "
+                "or export the gallery metadata to CSV instead."
+            ) from exc
+        table = pq.read_table(source)
+        columns = {name.lower(): name for name in table.column_names}
+        if "lat" not in columns or "lon" not in columns:
+            raise ValueError(f"Gallery metadata lacks lat/lon columns: {table.column_names}")
+        lats = table[columns["lat"]].to_pylist()
+        lons = table[columns["lon"]].to_pylist()
+    else:
+        import csv
+
+        with source.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        if not rows:
+            raise ValueError(f"Gallery metadata is empty: {source}")
+        fields = {name.lower(): name for name in rows[0]}
+        if "lat" not in fields or "lon" not in fields:
+            raise ValueError(f"Gallery metadata lacks lat/lon columns: {list(rows[0])}")
+        lats = [row[fields["lat"]] for row in rows]
+        lons = [row[fields["lon"]] for row in rows]
+
+    coordinates = np.asarray(
+        [(float(lat), float(lon)) for lat, lon in zip(lats, lons)], dtype=np.float64
+    )
+    if coordinates.size == 0:
+        raise ValueError(f"Gallery metadata contains no coordinates: {source}")
+
+    finite = np.isfinite(coordinates).all(axis=1)
+    in_range = (
+        (coordinates[:, 0] >= -90)
+        & (coordinates[:, 0] <= 90)
+        & (coordinates[:, 1] >= -180)
+        & (coordinates[:, 1] <= 180)
+    )
+    valid = coordinates[finite & in_range]
+    if valid.size == 0:
+        raise ValueError(f"Gallery metadata contains no valid coordinates: {source}")
+    if len(valid) != len(coordinates):
+        logger.warning(
+            "Dropped %d out-of-range coordinate(s) from %s", len(coordinates) - len(valid), source
+        )
+    return valid
+
+
 class GeoLocator:
     """Loads GeoCLIP once and scores images against its cached GPS gallery."""
 
-    def __init__(self, device: str | None = None, offline: bool = False) -> None:
+    def __init__(
+        self,
+        device: str | None = None,
+        offline: bool = False,
+        gallery_path: str | os.PathLike[str] | None = None,
+        gallery_mode: str | None = None,
+    ) -> None:
         """Load the model and pre-encode the GPS gallery.
 
         Args:
@@ -74,6 +181,19 @@ class GeoLocator:
             offline: If True, forbid Hugging Face from reaching the network.
                 Fails loudly if the CLIP backbone is not already cached, which
                 is the desired behaviour for an air-gapped run.
+            gallery_path: Optional custom GPS gallery produced by the
+                gallery-pipeline. Falls back to ``$VIEWFINDER_GALLERY``. When
+                neither is set, GeoCLIP's bundled 100k-coordinate gallery is
+                used unchanged.
+            gallery_mode: ``"augment"`` (default) appends the custom
+                coordinates to the bundled gallery, keeping global coverage
+                while adding fine-grained options in the covered regions.
+                ``"replace"`` swaps the gallery out entirely, which restricts
+                every prediction to the custom coordinates. Falls back to
+                ``$VIEWFINDER_GALLERY_MODE``.
+
+        Raises:
+            ValueError: If ``gallery_mode`` is not a recognised mode.
         """
         if offline:
             # Must be set before transformers is touched by the geoclip import.
@@ -89,8 +209,78 @@ class GeoLocator:
         self.model.eval()
         self.model.to(self.device)
 
-        self.gps_gallery = self.model.gps_gallery.to(self.device)
+        gallery = self.model.gps_gallery
+        self.gallery_info: dict[str, Any] = {
+            "source": "geoclip-default",
+            "mode": None,
+            "bundled_coordinates": int(len(gallery)),
+            "custom_coordinates": 0,
+            "total_coordinates": int(len(gallery)),
+        }
+
+        resolved_path = gallery_path if gallery_path is not None else os.getenv(GALLERY_ENV)
+        if resolved_path:
+            mode = (gallery_mode or os.getenv(GALLERY_MODE_ENV) or DEFAULT_GALLERY_MODE).lower()
+            if mode not in GALLERY_MODES:
+                raise ValueError(
+                    f"Unknown gallery mode {mode!r}; expected one of {', '.join(GALLERY_MODES)}"
+                )
+            gallery = self._build_gallery(gallery, resolved_path, mode)
+            # Keep the wrapped model coherent for anything reading it directly.
+            self.model.gps_gallery = gallery
+
+        self.gps_gallery = gallery.to(self.device)
         self._location_features = self._encode_gallery()
+
+    def _build_gallery(self, bundled: torch.Tensor, path: str | os.PathLike[str], mode: str) -> torch.Tensor:
+        """Merge or replace the bundled GPS gallery with custom coordinates."""
+        custom = load_gallery_coordinates(path)
+        custom_tensor = torch.tensor(custom, dtype=bundled.dtype)
+
+        if mode == "replace":
+            merged = custom_tensor
+        else:
+            # Only the custom coordinates are deduplicated, and only against the
+            # bundled set and themselves. The bundled gallery is passed through
+            # untouched: it contains its own repeated coordinates, and dropping
+            # those would change GeoCLIP's default behaviour rather than just
+            # extending it, making an augmented run incomparable to a default one.
+            bundled_cpu = bundled.cpu()
+            # Compare both sides in the bundled gallery's dtype. GeoCLIP's gallery is
+            # float32, whose precision at these magnitudes (~4e-6) is close to the
+            # rounding step, so rounding a float64 copy of the same coordinate can
+            # land on a different value and defeat the comparison.
+            known = {
+                tuple(row) for row in np.round(bundled_cpu.numpy(), _COORD_DECIMALS).tolist()
+            }
+            keep: list[int] = []
+            for index, row in enumerate(
+                np.round(custom_tensor.numpy(), _COORD_DECIMALS).tolist()
+            ):
+                key = tuple(row)
+                if key not in known:
+                    known.add(key)
+                    keep.append(index)
+            added = custom_tensor[keep] if keep else custom_tensor[:0]
+            merged = torch.cat([bundled_cpu, added], dim=0)
+            logger.debug(
+                "%d of %d custom coordinates were already in the bundled gallery",
+                len(custom_tensor) - len(added), len(custom_tensor),
+            )
+
+        self.gallery_info = {
+            "source": str(path),
+            "mode": mode,
+            "bundled_coordinates": int(len(bundled)),
+            "custom_coordinates": int(len(custom_tensor)),
+            "custom_coordinates_added": int(len(merged) - len(bundled)) if mode == "augment" else int(len(merged)),
+            "total_coordinates": int(len(merged)),
+        }
+        logger.info(
+            "Custom GPS gallery (%s): %d bundled + %d custom -> %d coordinates",
+            mode, len(bundled), len(custom_tensor), len(merged),
+        )
+        return merged
 
     @torch.inference_mode()
     def _encode_gallery(self) -> torch.Tensor:
