@@ -22,7 +22,10 @@ tiling:
   # is never reached in a bounded run.
   interleave_regions: true
 
-  max_tiles_per_run: 40
+  # Raised for the expanded Puget scale-up. Avenue of the Giants tiles are already
+  # completed in data/target-regions, so they are skipped via the checkpoint store
+  # (no re-query); a run against that data dir is therefore Puget-only in practice.
+  max_tiles_per_run: 110
 
   # Image density varies unpredictably even within a single region, so the per-region
   # cell sizes below are a starting point, not a guarantee. A cell the API rejects as
@@ -51,17 +54,22 @@ tiling:
       cell_size_degrees: 0.03
 
     # 2. Puget Sound fjords / Hood Canal, Washington.
-    #    The glacially-carved fjord shoreline from Seabeck north past the Great Bend
-    #    to the Hood Canal Bridge.
+    #    The glacially-carved fjord shoreline of the Kitsap Peninsula and Hood Canal,
+    #    from the Great Bend north past Seabeck to the Hood Canal Bridge.
     #
-    #    The same live sweep (32 cells) showed this region is genuinely sparse -
-    #    only 6 of 32 cells held any imagery, clustered near the bridge crossing
-    #    (47.80-47.85) and two shoreline pockets. Coverage here follows a handful of
-    #    shoreline roads, so a majority of cells returning nothing is expected and
-    #    cheap: an empty cell costs one API call.
-    #    0.05 was accepted at every sampled anchor, so no subdivision is expected.
+    #    EXPANDED from the original [-123.00,47.60,-122.80,47.90] box. A wider live
+    #    sweep (156 cells over [-123.25,47.35,-122.60,47.95]) found 58 cells with
+    #    imagery / 947 sampled photos - far denser than the first probe suggested.
+    #    The reason the original run was sparse: those bounds sat over the empty
+    #    western water of the canal, while the actual Mapillary coverage follows the
+    #    peninsula roads to the EAST (out to -122.60) and SOUTH (down to 47.35).
+    #    These bounds capture that dense eastern/southern coverage and drop the
+    #    empty north-west quadrant.
+    #
+    #    One cell, (47.70,-122.65), was rejected as too dense (DEN) in the sweep and
+    #    will exercise the automatic subdivision path live.
     - name: puget_hood_canal
-      bounds: [-123.00, 47.60, -122.80, 47.90]
+      bounds: [-123.05, 47.35, -122.60, 47.95]
       cell_size_degrees: 0.05
 
 extract:

@@ -1,0 +1,61 @@
+# Isolated LIVE run for the EXPANDED Puget Sound / Hood Canal region only.
+#
+# Purpose: scope a scale-up extraction to just Puget Sound, without touching the
+# still-pending Avenue of the Giants tiles in the target-regions run. It shares
+# the target-regions data_dir, so:
+#   * extract/validate/transform operate only on the Puget tiles this run
+#     completes (the DAG threads each stage's tile_ids forward), and
+#   * the load stage rebuilds the gallery from ALL transformed assets already in
+#     the catalog (existing Avenue of the Giants + old + new Puget), producing
+#     the next version (v2) rather than a fresh v1.
+#
+# The Puget bounds here mirror the expanded box documented in
+# tiling_config_target_regions.yaml; keep the two in sync if either changes.
+#
+#   export GALLERY_CONFIG=config/tiling_config_puget_expand.yaml
+
+paths:
+  data_dir: data/target-regions
+
+tiling:
+  mode: regions
+  interleave_regions: false
+  max_tiles_per_run: 130
+
+  subdivision_factor: 2
+  max_subdivision_depth: 3
+
+  regions:
+    # Expanded from a 156-cell live sweep over [-123.25,47.35,-122.60,47.95],
+    # which found 58 cells with imagery / 947 photos. The dense coverage follows
+    # the Kitsap Peninsula / Hood Canal roads to the east and south; the empty
+    # north-west water quadrant is intentionally excluded. Cell (47.70,-122.65)
+    # was rejected as too dense and will exercise live subdivision.
+    - name: puget_hood_canal
+      bounds: [-123.05, 47.35, -122.60, 47.95]
+      cell_size_degrees: 0.05
+
+extract:
+  page_size: 25
+  max_images_per_tile: 25
+  request_timeout_seconds: 60
+  min_request_interval_seconds: 1.0
+  max_http_attempts: 5
+  backoff_base_seconds: 2.0
+
+validate:
+  perceptual_hash_distance: 6
+
+transform:
+  max_images_per_tile: 25
+  blur_variance_threshold: 75.0
+  exclude_likely_indoor: true
+  embedding_model: ViT-B-32
+  embedding_pretrained: laion2b_s34b_b79k
+  embedding_batch_size_gpu: 32
+  embedding_batch_size_cpu: 8
+
+quality_check:
+  minimum_total_images: 1
+  expected_regions: []
+  minimum_region_fraction: 0.01

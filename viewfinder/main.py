@@ -225,10 +225,14 @@ class PredictorSpec:
     label: str
     build: Callable[[], Any]
     load_hint: str
+    # Enables the retrieval-only weak-similarity re-rank and the best-match
+    # caution in the CLI. None for GeoCLIP, whose scores have no similarity scale.
+    weak_similarity_threshold: float | None = None
 
 
 def _predictor_specs(args: argparse.Namespace) -> list[PredictorSpec]:
     """Return the predictors selected by --predictor, in report order."""
+    weak_threshold = _import_attr("aggregator", "DEFAULT_WEAK_SIMILARITY_THRESHOLD")
     geoclip = PredictorSpec(
         key="geoclip",
         label="GeoCLIP",
@@ -248,6 +252,7 @@ def _predictor_specs(args: argparse.Namespace) -> list[PredictorSpec]:
             "gallery.faiss, metadata.parquet and manifest.json, and that faiss-cpu, "
             "open-clip-torch and pyarrow are installed."
         ),
+        weak_similarity_threshold=weak_threshold,
     )
 
     if args.predictor == "geoclip":
@@ -292,6 +297,7 @@ def _serialize_aggregate(aggregate_result: Any, places: list[dict[str, str]]) ->
                 "confidence": round(float(cluster_prediction.confidence), 1),
                 "support_count": int(cluster_prediction.support_count),
                 "candidate_count": int(cluster_prediction.candidate_count),
+                "top_similarity": round(float(cluster_prediction.top_similarity), 4),
                 "country": place["country"],
                 "admin1": place["admin1"],
                 "city": place["city"],
@@ -309,6 +315,7 @@ def _serialize_aggregate(aggregate_result: Any, places: list[dict[str, str]]) ->
             "confidence_percent": best["confidence"],
             "support_count": best["support_count"],
             "candidate_count": best["candidate_count"],
+            "top_similarity": best["top_similarity"],
         }
     )
     return {
@@ -364,6 +371,7 @@ def _process_image(
             [frame_prediction_class(candidates=candidates)],
             top_k=top_k,
             max_predictions=max_predictions,
+            weak_similarity_threshold=spec.weak_similarity_threshold,
         ),
     )
 
@@ -382,6 +390,8 @@ def _process_image(
 
     output = _serialize_aggregate(aggregate_result, places)
     output["predictor"] = spec.key
+    if spec.weak_similarity_threshold is not None:
+        output["weak_similarity_threshold"] = spec.weak_similarity_threshold
     output["processing"] = {
         "candidates_returned": len(candidates),
         "clusters_returned": len(aggregate_result.predictions),
@@ -483,6 +493,7 @@ def _process_video(
             predictions,
             top_k=top_k,
             max_predictions=max_predictions,
+            weak_similarity_threshold=spec.weak_similarity_threshold,
         ),
         hint="Use a clip with multiple clear views of the same general area.",
     )
@@ -511,6 +522,8 @@ def _process_video(
     )
     output = _serialize_aggregate(aggregate_result, places)
     output["predictor"] = spec.key
+    if spec.weak_similarity_threshold is not None:
+        output["weak_similarity_threshold"] = spec.weak_similarity_threshold
     output["processing"] = processing
     _attach_gallery_details(output, geolocator, predictions)
     return output
@@ -575,7 +588,7 @@ def _print_comparison(result: dict[str, Any], output_path: Path, *, quiet: bool)
             print(
                 f"  gallery: v{gallery['version']} — {gallery['image_count']} reference photos"
                 f" — matched {block['processing'].get('gallery_images_matched', 0)}"
-                f" — best match similarity "
+                f" — closest single match "
                 f"{block['processing'].get('top_similarity', float('nan')):.3f}"
             )
         _print_body(block)
@@ -601,11 +614,32 @@ def _print_single(result: dict[str, Any], output_path: Path, *, quiet: bool) -> 
         print(
             f"Gallery:     v{gallery['version']} — {gallery['image_count']} reference photos"
             f" — matched {result['processing'].get('gallery_images_matched', 0)}"
-            f" — best match similarity "
+            f" — closest single match "
             f"{result['processing'].get('top_similarity', float('nan')):.3f}"
         )
     _print_body(result)
     print(f"JSON output: {output_path}")
+
+
+def _best_match_note(block: dict[str, Any]) -> str:
+    """Annotate the confidence line with the retrieval primary's best match.
+
+    Retrieval confidence measures how well the returned neighbours agree, not
+    how good the match is. A high confidence built on a low best-match cosine
+    similarity is the tell that the query's true location may be absent from the
+    gallery, so that case is flagged inline on the primary result rather than
+    left buried in JSON. GeoCLIP has no similarity scale, so this is a no-op for
+    it (the threshold key is only written for retrieval).
+    """
+    threshold = block.get("weak_similarity_threshold")
+    if threshold is None:
+        return ""
+    top_similarity = block.get("prediction", {}).get("top_similarity")
+    if top_similarity is None:
+        return ""
+    if top_similarity < threshold:
+        return f" (best match: {top_similarity:.2f} — weak, treat with caution)"
+    return f" (best match: {top_similarity:.2f})"
 
 
 def _print_body(block: dict[str, Any]) -> None:
@@ -617,7 +651,7 @@ def _print_body(block: dict[str, Any]) -> None:
         f"{prediction['latitude']:.6f}, {prediction['longitude']:.6f}"
     )
     if "confidence_percent" in prediction:
-        print(f"Confidence:  {prediction['confidence_percent']:.1f}%")
+        print(f"Confidence:  {prediction['confidence_percent']:.1f}%{_best_match_note(block)}")
     else:
         print(f"Model score: {prediction['model_score']:.6g}")
     if "support_count" in prediction:

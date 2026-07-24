@@ -83,6 +83,38 @@ CLUSTER_WEIGHTS_VIDEO = {
 }
 SUPPORT_PRIOR = 3.0
 
+# --- Similarity-aware re-ranking (retrieval predictor only) -------------------
+#
+# The retrieval predictor scores candidates by cosine similarity, a number with
+# an absolute meaning: ~1.0 is a near-identical photo, ~0.5 is a weak match.
+# GeoCLIP's softmax probabilities have no such absolute scale, so this re-ranking
+# is opt-in and only the retrieval path enables it (see aggregate's
+# weak_similarity_threshold parameter, left None by default).
+#
+# The problem it fixes: confidence rewards individually strong, internally
+# consistent matches. A small cluster of 4 photos that each score 0.55 can beat
+# a larger cluster of 6 photos that each score 0.45 on confidence, even though
+# the larger cluster is better corroborated. When the winning cluster's *best*
+# match is itself weak, that confidence is being earned by matches that are all
+# mediocre, and the count of corroborating photos becomes the more trustworthy
+# signal. This is exactly the observed Seabeck-vs-Redway failure.
+#
+# Below this best-match cosine similarity, the confidence leader is considered
+# "weak" and eligible to be overtaken by a better-supported cluster.
+DEFAULT_WEAK_SIMILARITY_THRESHOLD = 0.6
+# A challenger must hold at least this many times the leader's matched-photo
+# count to trigger the blend. Keeps the re-rank from flipping on ties or trivial
+# differences (6 vs 4 photos = 1.5x, which just qualifies).
+SUPPORT_DOMINANCE_RATIO = 1.5
+# When the blend is triggered, each cluster is re-scored as
+#     blend = W_CONFIDENCE * (confidence / 100) + W_SUPPORT * (matched / max_matched)
+# Confidence still leads (it carries geographic tightness and score consistency),
+# but the volume of corroborating matches gets substantial weight because, at
+# weak absolute similarity, small per-photo score gaps are largely noise. These
+# weights sum to 1.0.
+RERANK_WEIGHT_CONFIDENCE = 0.6
+RERANK_WEIGHT_SUPPORT = 0.4
+
 
 # --- Data types ---------------------------------------------------------------
 
@@ -212,6 +244,14 @@ class ClusterPrediction:
     candidate_count: int
     confidence_breakdown: ConfidenceBreakdown
     cluster: Cluster = field(repr=False)
+    top_similarity: float = 0.0
+    """The single best raw candidate score in this cluster.
+
+    For retrieval this is a cosine similarity in [-1, 1] and reads directly as
+    "how much the query resembles the closest reference photo in this cluster".
+    For GeoCLIP it is the top softmax probability, which has no absolute meaning
+    and is not surfaced to users. It drives the weak-similarity re-rank.
+    """
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -220,6 +260,7 @@ class ClusterPrediction:
             "confidence": round(self.confidence, 1),
             "support_count": self.support_count,
             "candidate_count": self.candidate_count,
+            "top_similarity": round(self.top_similarity, 4),
         }
 
 
@@ -601,6 +642,10 @@ def _score_cluster(
         confidence=confidence,
         support=support,
     )
+    # The cluster's best raw match. cluster.members carry their original scores
+    # (cosine similarity for retrieval), independent of the per-frame
+    # normalization used for the confidence signals.
+    top_similarity = max((member.score for member in cluster.members), default=0.0)
     return ClusterPrediction(
         lat=cluster.lat,
         lon=cluster.lon,
@@ -609,6 +654,62 @@ def _score_cluster(
         candidate_count=cluster.size,
         confidence_breakdown=breakdown,
         cluster=cluster,
+        top_similarity=float(top_similarity),
+    )
+
+
+def _rerank_weak_similarity(
+    predictions: list[ClusterPrediction],
+    threshold: float,
+) -> list[ClusterPrediction]:
+    """Re-rank retrieval clusters when the confidence leader is a weak match.
+
+    Leaves the ranking untouched unless BOTH hold:
+
+    * the current top cluster's best match is below ``threshold`` (its
+      confidence is riding on individually mediocre matches), and
+    * some other cluster holds at least ``SUPPORT_DOMINANCE_RATIO`` times as many
+      matched photos (it is materially better corroborated).
+
+    When triggered, every cluster is re-scored with the documented blend of
+    normalized confidence and normalized matched-photo count, and the list is
+    re-sorted. When not triggered, confidence ranking stands, so strong-match
+    results (e.g. Avenue of the Giants at 0.74) are never disturbed.
+
+    ``candidate_count`` is the matched-photo count here: for a single image every
+    cluster has ``support_count == 1``, so the number of gallery photos in the
+    cluster is what distinguishes better- from worse-corroborated hypotheses.
+    """
+    if len(predictions) < 2:
+        return predictions
+
+    leader = predictions[0]
+    if leader.top_similarity >= threshold:
+        return predictions
+
+    max_matched = max(prediction.candidate_count for prediction in predictions)
+    has_dominant_challenger = any(
+        prediction.candidate_count >= SUPPORT_DOMINANCE_RATIO * leader.candidate_count
+        for prediction in predictions[1:]
+    )
+    if not has_dominant_challenger:
+        return predictions
+
+    def blended(prediction: ClusterPrediction) -> float:
+        confidence_norm = prediction.confidence / 100.0
+        support_norm = prediction.candidate_count / max_matched if max_matched else 0.0
+        return (
+            RERANK_WEIGHT_CONFIDENCE * confidence_norm + RERANK_WEIGHT_SUPPORT * support_norm
+        )
+
+    return sorted(
+        predictions,
+        key=lambda prediction: (
+            blended(prediction),
+            prediction.candidate_count,
+            prediction.cluster.weight,
+        ),
+        reverse=True,
     )
 
 
@@ -618,6 +719,7 @@ def aggregate(
     cluster_radius_km: float = DEFAULT_CLUSTER_RADIUS_KM,
     max_predictions: int = 5,
     max_alternatives: int | None = None,
+    weak_similarity_threshold: float | None = None,
 ) -> AggregateResult:
     """Cluster, independently score, and rank distinct location hypotheses.
 
@@ -628,6 +730,13 @@ def aggregate(
         max_predictions: Maximum ranked clusters to return, including primary.
         max_alternatives: Deprecated compatibility alias. If supplied, returns
             one primary plus this many alternatives.
+        weak_similarity_threshold: Enables similarity-aware re-ranking for the
+            retrieval predictor. When set (typically
+            ``DEFAULT_WEAK_SIMILARITY_THRESHOLD``) and the confidence leader's
+            best match is below it, a materially better-corroborated cluster can
+            be promoted; see :func:`_rerank_weak_similarity`. Left ``None`` by
+            GeoCLIP, whose scores have no absolute similarity scale, so its
+            ranking is unchanged.
 
     Returns:
         An :class:`AggregateResult`.
@@ -683,6 +792,12 @@ def aggregate(
         ),
         reverse=True,
     )
+
+    # Retrieval only: let a much-better-corroborated cluster overtake a weak-match
+    # confidence leader. Applied before truncation so a promotable cluster outside
+    # the top max_predictions is still considered. No-op for GeoCLIP (None).
+    if weak_similarity_threshold is not None:
+        predictions = _rerank_weak_similarity(predictions, weak_similarity_threshold)
 
     return AggregateResult(
         predictions=predictions[:max_predictions],

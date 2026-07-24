@@ -9,7 +9,8 @@
     "city": "Fishhook",
     "confidence_percent": 74.3,
     "support_count": 1,
-    "candidate_count": 1
+    "candidate_count": 1,
+    "top_similarity": 0.0935
   },
   "predictions": [
     {
@@ -19,6 +20,7 @@
       "confidence": 74.3,
       "support_count": 1,
       "candidate_count": 1,
+      "top_similarity": 0.0935,
       "country": "US",
       "admin1": "Alaska",
       "city": "Fishhook",
@@ -44,6 +46,7 @@
       "confidence": 46.7,
       "support_count": 1,
       "candidate_count": 4,
+      "top_similarity": 0.0593,
       "country": "US",
       "admin1": "Alaska",
       "city": "Girdwood",
@@ -71,6 +74,7 @@
       "confidence": 46.7,
       "support_count": 1,
       "candidate_count": 4,
+      "top_similarity": 0.0593,
       "country": "US",
       "admin1": "Alaska",
       "city": "Girdwood",
@@ -90,6 +94,7 @@
       }
     }
   ],
+  "predictor": "geoclip",
   "processing": {
     "candidates_returned": 5,
     "clusters_returned": 2

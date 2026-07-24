@@ -164,6 +164,44 @@ def load_gallery_coordinates(path: str | os.PathLike[str]) -> np.ndarray:
     return valid
 
 
+def _silence_slow_processor_notice() -> None:
+    """Drop GeoCLIP's harmless "slow image processor" notice from transformers.
+
+    GeoCLIP's bundled ``ImageEncoder`` builds the CLIP processor with
+    ``AutoProcessor.from_pretrained(...)`` and no ``use_fast`` argument, so
+    transformers logs a one-time notice that it is defaulting to the slow
+    processor. The fast and slow processors differ only in minor numerical ways,
+    and we cannot pass ``use_fast`` through GeoCLIP's hardcoded call, so this
+    filters just that one message rather than lowering transformers' log level
+    and hiding genuine warnings.
+
+    The filter is attached to the transformers logger and, crucially, to its
+    handlers: the notice is emitted by a child logger whose records reach the
+    parent's *handlers* on propagation, so a handler-level filter is what
+    actually catches it.
+    """
+    import logging as _logging
+
+    message_marker = "use_fast"
+
+    class _DropUseFast(_logging.Filter):
+        def filter(self, record: _logging.LogRecord) -> bool:
+            try:
+                return message_marker not in record.getMessage()
+            except Exception:
+                return True
+
+    transformers_logger = _logging.getLogger("transformers")
+    # Avoid stacking duplicate filters if a GeoLocator is constructed repeatedly.
+    if getattr(transformers_logger, "_viewfinder_use_fast_filtered", False):
+        return
+    filt = _DropUseFast()
+    transformers_logger.addFilter(filt)
+    for handler in transformers_logger.handlers:
+        handler.addFilter(filt)
+    transformers_logger._viewfinder_use_fast_filtered = True  # type: ignore[attr-defined]
+
+
 class GeoLocator:
     """Loads GeoCLIP once and scores images against its cached GPS gallery."""
 
@@ -201,6 +239,10 @@ class GeoLocator:
             os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
         from geoclip import GeoCLIP  # imported lazily: pulls in transformers
+
+        # transformers is now imported, so its logger/handler exist and the
+        # filter below will be in place before GeoCLIP builds the CLIP processor.
+        _silence_slow_processor_notice()
 
         self.device = resolve_device(device)
         logger.info("Loading GeoCLIP on %s", self.device)
