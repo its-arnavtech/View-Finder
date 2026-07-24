@@ -60,6 +60,14 @@ huggingface/
 !images_viewfinder.json
 !IMG_6790_viewfinder.json
 
+# === images/ : local image inputs and datasets ===
+# Only the small committed test fixtures are tracked. Everything else placed here
+# (the Im2GPS benchmark set, ad-hoc inputs, image3.png) stays local and out of git.
+images/*
+!images/alsk.png
+!images/images.png
+!images/IMG_6790.png
+
 # === Scratch / temp ===
 scratchpad/
 tmp/

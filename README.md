@@ -73,7 +73,7 @@ Run the retrieval predictor against a committed gallery (works fully offline
 after the one-time OpenCLIP weight download):
 
 ```bash
-python -m viewfinder.main --input IMG_6790.png --predictor retrieval \
+python -m viewfinder.main --input images/IMG_6790.png --predictor retrieval \
   --gallery-path gallery-pipeline/data/target-regions/gallery/v2
 ```
 
@@ -81,7 +81,7 @@ Or run both predictors side by side (GeoCLIP downloads its CLIP ViT-L/14 backbon
 once, ~1.7 GB):
 
 ```bash
-python -m viewfinder.main --input IMG_6790.png --predictor both \
+python -m viewfinder.main --input images/IMG_6790.png --predictor both \
   --gallery-path gallery-pipeline/data/target-regions/gallery/v2
 ```
 
@@ -130,7 +130,7 @@ required at query time), so retrieval reproduces the documented results out of
 the box:
 
 ```powershell
-python -m viewfinder.main --input .\IMG_6790.png --predictor both `
+python -m viewfinder.main --input .\images\IMG_6790.png --predictor both `
   --gallery-path .\gallery-pipeline\data\target-regions\gallery\v2
 ```
 
