@@ -75,14 +75,31 @@ After that setup step, normal CLI runs do not make network calls. If the model
 is not cached, the CLI exits with an actionable error instead of downloading it
 silently.
 
-The retrieval predictor additionally needs `faiss-cpu`, `open-clip-torch`, and
-`pyarrow`, plus a one-time cache of the OpenCLIP checkpoint that built the
-gallery:
+`viewfinder/requirements.txt` already includes the retrieval predictor's
+dependencies (`faiss-cpu`, `open-clip-torch`, `torchvision`, `pyarrow`). To use
+`--predictor retrieval`, also cache its OpenCLIP checkpoint once and point it at
+a gallery (see [Galleries](#galleries)):
 
 ```powershell
-python -m pip install faiss-cpu open-clip-torch pyarrow
 python -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')"
 ```
+
+### Galleries
+
+The retrieval predictor searches a FAISS gallery built by `gallery-pipeline`.
+Prebuilt galleries are checked into `gallery-pipeline/data/*/gallery/vN/` (the
+FAISS index + metadata + manifest — not the raw source images, which are not
+required at query time), so retrieval reproduces the documented results out of
+the box:
+
+```powershell
+python -m viewfinder.main --input .\IMG_6790.png --predictor both `
+  --gallery-path .\gallery-pipeline\data\target-regions\gallery\v2
+```
+
+To build your own gallery (denser or elsewhere), run the pipeline — see
+`gallery-pipeline/README.md`. That step needs a Mapillary token; querying an
+existing gallery does not.
 
 ## Usage
 

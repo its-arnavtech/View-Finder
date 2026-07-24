@@ -1,9 +1,23 @@
-geoclip
-numpy
-opencv-python
-Pillow
+# View Finder CLI dependencies, pinned for reproducible predictions.
+# Install into a fresh venv:  python -m pip install -r viewfinder/requirements.txt
+
+# --- Core (both predictors) ---
+numpy==2.5.1
+opencv-python==5.0.0.93
+Pillow==12.3.0
+torch==2.13.0
 reverse_geocoder==1.5.1
-torch
+
+# --- GeoCLIP predictor (default) ---
+geoclip==1.2.0
 # GeoCLIP 1.2.0 expects CLIPModel.get_image_features() to return a Tensor.
 # Transformers 5 returns BaseModelOutputWithPooling and breaks inference.
-transformers<5
+transformers==4.57.6
+
+# --- Retrieval predictor (--predictor retrieval / both) ---
+# Query images are embedded with the SAME OpenCLIP model gallery-pipeline used to
+# build the gallery, then matched with FAISS. pyarrow reads the gallery metadata.
+faiss-cpu==1.14.3
+open-clip-torch==3.3.0
+torchvision==0.28.0
+pyarrow==25.0.0

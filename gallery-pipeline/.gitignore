@@ -1,7 +1,15 @@
 .env
 .airflow/
+# Raw scraped images, SQLite catalogs, and intermediate parquet are large and
+# regenerable and stay out of git. Built gallery artifacts (FAISS index +
+# metadata + manifest + reports) ARE committed so the retrieval predictor
+# reproduces exactly on a fresh clone; they contain no raw images.
 data/*
 !data/.gitkeep
+!data/*/
+data/*/*
+!data/*/gallery/
+!data/*/gallery/**
 __pycache__/
 *.py[cod]
 .pytest_cache/

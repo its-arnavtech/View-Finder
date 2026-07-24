@@ -1,0 +1,40 @@
+{
+  "build_timestamp": "2026-07-24T01:30:03.958744+00:00",
+  "embedding_dimension": 512,
+  "embedding_model": "open_clip:ViT-B-32:laion2b_s34b_b79k",
+  "files": {
+    "index": "gallery.faiss",
+    "metadata": "metadata.parquet"
+  },
+  "geographic_coverage": {
+    "North America": 274
+  },
+  "quality_checked_at": "2026-07-24T01:30:04.766218+00:00",
+  "status": "quality_passed",
+  "tile_ids": [
+    "global_0005_p38d0_m119d92_p0d08",
+    "global_0007_p37d04_m119d88_p0d04",
+    "global_0007_p37d04_m119d92_p0d04",
+    "global_0007_p37d04_m119d96_p0d04",
+    "global_0007_p37d04_m119d99_p0d01",
+    "global_0007_p37d05_m119d99_p0d01",
+    "global_0007_p37d05_m120d0_p0d01",
+    "global_0007_p37d06_m119d98_p0d02",
+    "global_0007_p37d06_m120d0_p0d02",
+    "global_0007_p37d0_m119d88_p0d04",
+    "global_0007_p37d0_m119d92_p0d04",
+    "global_0007_p37d0_m119d96_p0d04",
+    "global_0007_p37d0_m120d0_p0d04",
+    "global_0014_p36d50_m119d95_p0d05",
+    "global_0014_p36d50_m120d0_p0d05",
+    "global_0034_p37d0_m120d97_p0d03",
+    "global_0036_p36d51_m121d97_p0d03",
+    "global_0050_p37d0_m121d97_p0d03",
+    "global_0056_p38d0_m123d0_p0d03",
+    "global_0061_p38d0_m121d97_p0d03",
+    "global_0061_p38d0_m122d0_p0d03"
+  ],
+  "tiles_covered": 21,
+  "total_image_count": 274,
+  "version": 1
+}

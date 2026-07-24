@@ -1,0 +1,35 @@
+{
+  "build_timestamp": "2026-07-23T05:02:56.109536+00:00",
+  "embedding_dimension": 512,
+  "embedding_model": "open_clip:ViT-B-32:laion2b_s34b_b79k",
+  "files": {
+    "index": "gallery.faiss",
+    "metadata": "metadata.parquet"
+  },
+  "geographic_coverage": {
+    "North America": 299
+  },
+  "quality_checked_at": "2026-07-23T05:02:56.567225+00:00",
+  "status": "quality_passed",
+  "tile_ids": [
+    "avenue_of_giants_p40d27_m123d85_p0d03",
+    "avenue_of_giants_p40d27_m123d88_p0d03",
+    "avenue_of_giants_p40d27_m123d91_p0d03",
+    "avenue_of_giants_p40d27_m124d06_p0d03",
+    "avenue_of_giants_p40d30_m123d85_p0d03",
+    "avenue_of_giants_p40d30_m123d91_p0d03",
+    "avenue_of_giants_p40d30_m123d94_p0d03",
+    "avenue_of_giants_p40d30_m124d06_p0d03",
+    "avenue_of_giants_p40d33_m123d97_p0d03",
+    "avenue_of_giants_p40d33_m124d00_p0d03",
+    "avenue_of_giants_p40d33_m124d03_p0d03",
+    "avenue_of_giants_p40d33_m124d06_p0d03",
+    "puget_hood_canal_p47d65_m122d95_p0d05",
+    "puget_hood_canal_p47d6_m122d85_p0d05",
+    "puget_hood_canal_p47d80_m122d90_p0d05",
+    "puget_hood_canal_p47d80_m122d95_p0d05"
+  ],
+  "tiles_covered": 16,
+  "total_image_count": 299,
+  "version": 1
+}

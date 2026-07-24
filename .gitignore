@@ -35,10 +35,17 @@ airflow-*/
 *.db-wal
 *.db-shm
 
-# === Pipeline data & build artifacts (scraped images, catalogs, FAISS galleries) ===
-# These are large, regenerable, and may contain scraped third-party imagery.
+# === Pipeline data & build artifacts ===
+# Raw scraped images, SQLite catalogs, and intermediate parquet stay out (large,
+# regenerable, third-party imagery). Built gallery artifacts (FAISS index +
+# metadata + manifest + reports) ARE committed so the retrieval predictor
+# reproduces exactly on a fresh clone; they contain no raw images.
 gallery-pipeline/data/*
 !gallery-pipeline/data/.gitkeep
+!gallery-pipeline/data/*/
+gallery-pipeline/data/*/*
+!gallery-pipeline/data/*/gallery/
+!gallery-pipeline/data/*/gallery/**
 
 # === ML model caches / weights ===
 *.pth

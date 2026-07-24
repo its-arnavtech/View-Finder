@@ -1,0 +1,10 @@
+Gallery quality report: v2
+Status: PASS
+Generated: 2026-07-23T22:34:51.804106+00:00
+
+Checks:
+- artifact_integrity: PASS - Manifest, FAISS index, and metadata are readable
+- row_count: PASS - All artifacts contain 1305 images
+- duplicate_image_ids: PASS - All image_id values are unique
+- embedding_consistency: PASS - All vectors have dimension 512 and finite values
+- geographic_distribution: PASS - Coverage: {'North America': 1305}
