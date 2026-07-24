@@ -54,9 +54,46 @@ that disagreement is the useful signal.
 - A CUDA GPU is used automatically when available; CPU inference also works
 - A local video codec supported by OpenCV for video inputs
 
+## Quickstart from a fresh clone
+
+These are the exact, verified steps to go from a clean `git clone` to a working
+prediction. No Mapillary token is needed — the retrieval galleries are committed
+(index + metadata only), and model weights download once on first run.
+
+```bash
+git clone https://github.com/its-arnavtech/View-Finder.git
+cd View-Finder
+python -m venv .venv
+# Windows: .venv\Scripts\Activate.ps1   |   Linux/macOS: source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r viewfinder/requirements.txt
+```
+
+Run the retrieval predictor against a committed gallery (works fully offline
+after the one-time OpenCLIP weight download):
+
+```bash
+python -m viewfinder.main --input IMG_6790.png --predictor retrieval \
+  --gallery-path gallery-pipeline/data/target-regions/gallery/v2
+```
+
+Or run both predictors side by side (GeoCLIP downloads its CLIP ViT-L/14 backbone
+once, ~1.7 GB):
+
+```bash
+python -m viewfinder.main --input IMG_6790.png --predictor both \
+  --gallery-path gallery-pipeline/data/target-regions/gallery/v2
+```
+
+Expected on a correct setup: retrieval reports **Silverdale / Belfair, Washington**
+for the bundled test images against the `v2` gallery, and GeoCLIP reports a
+California result — the same numbers this repo documents. The dependencies in
+`viewfinder/requirements.txt` are pinned to the exact versions these results were
+produced with, so a fresh clone reproduces them.
+
 ## Installation
 
-From the project root:
+The Quickstart above is the short path. In full, from the project root:
 
 ```powershell
 py -3 -m venv .venv
