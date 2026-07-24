@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections import deque
 from itertools import zip_longest
 from pathlib import Path
@@ -18,20 +19,29 @@ from src.extract.tiling import Tile, subdivide_tile, tiles_from_config
 
 LOGGER = logging.getLogger(__name__)
 
-# A bbox holding more images than the API will serve is refused with HTTP 500 and this
-# text. The status alone is ambiguous (real outages are also 500), so the body decides
-# whether the right response is "subdivide" or "fail".
-DENSITY_REJECTION_MARKER = "reduce the amount of data"
+# Two distinct HTTP 500 rejections are both fixed by splitting the tile into
+# smaller cells and retrying:
+#   * too many images in the bbox ("...reduce the amount of data..."), and
+#   * a bbox exceeding Mapillary's maximum queryable area of 0.01 sq degrees
+#     ("Bounding box area is too large..."). A 0.1x0.1 cell sits exactly on this
+#     limit, so floating-point rounding pushes some just over it.
+# The status alone is ambiguous (real outages are also 500), so the body decides
+# whether to subdivide or fail.
+SUBDIVIDABLE_REJECTION_MARKERS = (
+    "reduce the amount of data",
+    "bounding box area is too large",
+)
 
 
-def _is_density_rejection(exc: Exception) -> bool:
-    """True when the API refused a bbox for holding too many images."""
+def _is_subdividable_rejection(exc: Exception) -> bool:
+    """True when the API refused a bbox that a smaller bbox would satisfy."""
     if not isinstance(exc, requests.HTTPError):
         return False
     response = getattr(exc, "response", None)
     if response is None or response.status_code != 500:
         return False
-    return DENSITY_REJECTION_MARKER in str(exc).lower()
+    message = str(exc).lower()
+    return any(marker in message for marker in SUBDIVIDABLE_REJECTION_MARKERS)
 
 
 def select_pending_tiles(config: dict[str, Any], store: CheckpointStore) -> list[Tile]:
@@ -77,10 +87,25 @@ def run_extract(config: dict[str, Any], client: MapillaryClient | None = None) -
     subdivision_factor = int(config["tiling"].get("subdivision_factor", 2))
     subdivisions: list[dict[str, Any]] = []
 
+    # Optional wall-clock budget for a single invocation. A global scrape is far too
+    # large for one run, so this lets each session stop cleanly after a bounded time;
+    # unstarted tiles simply stay pending and the next session resumes past what the
+    # checkpoint store has already completed. 0 / unset means no time limit.
+    max_runtime = float(extract.get("max_runtime_seconds", 0) or 0)
+    started_at = time.monotonic()
+    stopped_early = False
+
     # A queue rather than a plain loop: a tile the API rejects as too dense is replaced
     # by its children, which are processed in this same run.
     queue: deque[tuple[Tile, int]] = deque((tile, 0) for tile in selected)
     while queue:
+        if max_runtime > 0 and time.monotonic() - started_at >= max_runtime:
+            stopped_early = True
+            LOGGER.info(
+                "Time budget of %.0fs reached; stopping with %d tile(s) still queued",
+                max_runtime, len(queue),
+            )
+            break
         tile, depth = queue.popleft()
         found = 0
         new_count = 0
@@ -133,14 +158,14 @@ def run_extract(config: dict[str, Any], client: MapillaryClient | None = None) -
             )
         except Exception as exc:
             total_new += new_count  # partial work is already committed and durable
-            if _is_density_rejection(exc) and depth < max_depth:
+            if _is_subdividable_rejection(exc) and depth < max_depth:
                 children = subdivide_tile(tile, subdivision_factor)
                 if children:
-                    # Not a failure: the bbox simply holds more imagery than the API
-                    # will serve. Retry it as smaller cells in this same run.
+                    # Not a failure: the bbox is too large or too dense for the API.
+                    # Retry it as smaller cells in this same run.
                     store.mark_tile(
                         tile.tile_id, "failed", found,
-                        f"subdivided into {len(children)} cells (too dense at depth {depth})",
+                        f"subdivided into {len(children)} cells (rejected at depth {depth})",
                     )
                     queue.extendleft((child, depth + 1) for child in reversed(children))
                     subdivisions.append(
@@ -155,7 +180,7 @@ def run_extract(config: dict[str, Any], client: MapillaryClient | None = None) -
                         }
                     )
                     LOGGER.warning(
-                        "Tile=%s too dense at depth %d; subdivided into %d cells of ~%.4f deg",
+                        "Tile=%s rejected at depth %d; subdivided into %d cells of ~%.4f deg",
                         tile.tile_id, depth, len(children),
                         children[0].max_lon - children[0].min_lon,
                     )
@@ -168,4 +193,5 @@ def run_extract(config: dict[str, Any], client: MapillaryClient | None = None) -
         "tiles_completed": len(completed),
         "new_images": total_new,
         "subdivisions": subdivisions,
+        "stopped_early": stopped_early,
     }

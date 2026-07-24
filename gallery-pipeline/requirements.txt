@@ -10,6 +10,9 @@ numpy>=1.26,<3
 # sdist build (requiring cmake/Arrow C++) on Python 3.13+ interpreters.
 pyarrow>=16.1,<26
 faiss-cpu>=1.8,<2
+# Bundles the offline GeoNames cities1000 dataset used by global (population-aware)
+# tiling in src/extract/global_tiling.py.
+reverse_geocoder>=1.5,<2
 torch>=2.3,<3
 torchvision>=0.18,<1
 open-clip-torch>=2.26,<3

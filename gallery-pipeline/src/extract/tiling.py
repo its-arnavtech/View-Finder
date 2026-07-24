@@ -93,7 +93,14 @@ def subdivide_tile(tile: Tile, factor: int = 2) -> list[Tile]:
 
 def tiles_from_config(config: dict) -> Iterator[Tile]:
     tiling = config["tiling"]
-    if tiling.get("mode", "regions") == "world":
+    mode = tiling.get("mode", "regions")
+    if mode == "global":
+        # Population/land-aware programmatic grid; no hand-specified bounding boxes.
+        from src.extract.global_tiling import global_tiles
+
+        yield from global_tiles(config)
+        return
+    if mode == "world":
         yield from generate_tiles(
             tiling.get("world_bounds", [-180.0, -85.0, 180.0, 85.0]),
             tiling.get("cell_size_degrees", 1.0),

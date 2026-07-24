@@ -22,14 +22,27 @@ def _density_error() -> requests.HTTPError:
     )
 
 
+def _area_error() -> requests.HTTPError:
+    """An HTTPError shaped like Mapillary's bbox-area-too-large rejection."""
+    response = requests.Response()
+    response.status_code = 500
+    return requests.HTTPError(
+        "500 Server Error: Internal Server Error for url: https://example.invalid"
+        " | Bounding box area is too large. Maximum allowed area is 0.010 square"
+        " degrees, but got 0.010 square degrees.",
+        response=response,
+    )
+
+
 class DensityLimitedClient:
     """Rejects any bbox wider than `max_span`, like the live API does."""
 
     source = "mapillary"
 
-    def __init__(self, max_span: float, per_tile: int = 5):
+    def __init__(self, max_span: float, per_tile: int = 5, error=_density_error):
         self.max_span = max_span
         self.per_tile = per_tile
+        self.error = error
         self.rejected: list[str] = []
         self.served: list[str] = []
 
@@ -37,7 +50,7 @@ class DensityLimitedClient:
         span = tile.max_lon - tile.min_lon
         if span > self.max_span + 1e-9:
             self.rejected.append(tile.tile_id)
-            raise _density_error()
+            raise self.error()
         self.served.append(tile.tile_id)
         for i in range(self.per_tile):
             yield {
@@ -94,6 +107,24 @@ def test_dense_tile_subdivides_instead_of_failing(tmp_path: Path):
     assert result["tiles_completed"] == 4, "all four children should complete"
     assert result["new_images"] == 20
 
+    store = CheckpointStore(config["paths"]["catalog_path"])
+    assert len(store.completed_tile_ids()) == 4
+
+
+def test_area_too_large_error_also_subdivides(tmp_path: Path):
+    """The 'bounding box area is too large' 500 must subdivide, not fail the run.
+
+    This is the failure the live global run hit: a 0.1-degree cell equals
+    Mapillary's exact 0.01 sq-degree bbox-area limit and is refused with a
+    different message than the density rejection.
+    """
+    config = _config(tmp_path)
+    client = DensityLimitedClient(max_span=0.02, error=_area_error)
+    result = run_extract(config, client=client)
+
+    assert client.rejected, "the oversized cell should have been rejected"
+    assert len(result["subdivisions"]) == 1
+    assert result["tiles_completed"] == 4
     store = CheckpointStore(config["paths"]["catalog_path"])
     assert len(store.completed_tile_ids()) == 4
 

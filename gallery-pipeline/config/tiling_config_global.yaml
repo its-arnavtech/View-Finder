@@ -1,0 +1,82 @@
+# Population/land-aware GLOBAL tiling.
+#
+# Unlike the region configs, this specifies NO bounding boxes by hand. Tiles are
+# generated programmatically by src/extract/global_tiling.py from the bundled
+# GeoNames cities1000 dataset: ocean/uninhabited cells are skipped, and cell size
+# scales with local city density (denser -> finer).
+#
+#   export GALLERY_CONFIG=config/tiling_config_global.yaml
+#
+# A true global build is enormous and MUST be run incrementally over many
+# sessions. Bound each session with max_tiles_per_run and/or
+# extract.max_runtime_seconds; the checkpoint store skips completed tiles, so
+# successive runs resume and never re-query finished work. See README.md
+# ("Incremental global coverage") for the run loop.
+#
+# The `bounds` below scopes this file to a Northern California test window (SF Bay
+# -> Central Valley -> Sierra foothills), which spans all four density bands. Set
+# bounds to null for a real worldwide run.
+
+paths:
+  data_dir: data/global-test
+
+tiling:
+  mode: global
+
+  # Size of the coarse squares city points are counted in to estimate density.
+  supercell_degrees: 1.0
+
+  # Emit one tile per populated supercell per pass, densest first, so a bounded
+  # run samples many places instead of exhausting one metro. Use "density" to
+  # concentrate on the biggest cities first.
+  ordering: spread
+
+  # city-count (>=) -> cell size in degrees, richest first. Tuned from the observed
+  # cities1000 distribution and the cell sizes the live Mapillary API accepted.
+  # Cell sizes stay under Mapillary's 0.01 sq-deg bbox-area limit (a 0.1x0.1 cell
+  # sits exactly on it and fails intermittently).
+  density_bands:
+    - [100, 0.02]   # major metros
+    - [30, 0.03]    # large cities
+    - [8, 0.05]     # towns / suburbia
+    - [1, 0.08]     # rural but inhabited
+
+  # Test window. Set to null (or remove) for a worldwide run.
+  bounds: [-123.0, 36.5, -119.5, 39.0]
+
+  # Dense metro cells (0.02) can still exceed Mapillary's per-bbox limit; the
+  # extractor subdivides and retries automatically.
+  subdivision_factor: 2
+  max_subdivision_depth: 3
+
+  # Small budget for this test run. For real global runs raise this and/or set
+  # extract.max_runtime_seconds.
+  max_tiles_per_run: 25
+
+extract:
+  page_size: 25
+  max_images_per_tile: 20
+  request_timeout_seconds: 60
+  min_request_interval_seconds: 1.0
+  max_http_attempts: 5
+  backoff_base_seconds: 2.0
+  # Optional wall-clock budget per invocation (seconds). 0 = no limit. Set this
+  # for time-boxed incremental global sessions.
+  max_runtime_seconds: 0
+
+validate:
+  perceptual_hash_distance: 6
+
+transform:
+  max_images_per_tile: 20
+  blur_variance_threshold: 75.0
+  exclude_likely_indoor: true
+  embedding_model: ViT-B-32
+  embedding_pretrained: laion2b_s34b_b79k
+  embedding_batch_size_gpu: 32
+  embedding_batch_size_cpu: 8
+
+quality_check:
+  minimum_total_images: 1
+  expected_regions: []
+  minimum_region_fraction: 0.01

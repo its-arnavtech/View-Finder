@@ -20,7 +20,7 @@ Every Airflow stage is a separate TaskFlow task. The DAG applies three retries w
 
 ## Engineering decisions
 
-- **Deliberate coverage:** `src/extract/tiling.py` creates stable latitude/longitude cells. The checked-in development config uses denser grids around three example regions. Set `tiling.mode: world` for a global 1-degree grid. `max_tiles_per_run` bounds each run, so global collection advances incrementally instead of issuing tens of thousands of requests at once.
+- **Deliberate coverage:** `src/extract/tiling.py` creates stable latitude/longitude cells. Three tiling modes: `regions` (hand-listed bounding boxes, the development default), `world` (uniform 1-degree grid), and `global` (population/land-aware programmatic grid — skips ocean/uninhabited cells and scales cell size with local city density; see "Incremental global coverage"). `max_tiles_per_run` (and, for `global`, `extract.max_runtime_seconds`) bounds each run, so collection advances incrementally instead of issuing tens of thousands of requests at once.
 - **Safe resume:** a tile is set to `in_progress` before its first request and `completed` only after its final page and download. An interruption leaves it eligible for retry. Image IDs are unique in SQLite, existing files are skipped, and downloads use `.part` files followed by an atomic rename.
 - **API behavior:** Mapillary calls are bounded by tile, page size, and per-tile image cap. HTTP 429 and transient 5xx responses use exponential backoff with jitter; `Retry-After` is honored. The access token is read only from the environment.
 - **Validation:** Pillow fully decodes every file. Per-tile perceptual hashes remove near duplicates while retaining the first stable `image_id` ordering. Failed raw files remain on disk for audit but cannot enter later stages.
@@ -110,6 +110,64 @@ To inspect progress:
 ```bash
 sqlite3 data/catalog.db \
   "select status, count(*) as tiles, sum(images_found) as images from tiles group by status;"
+```
+
+## Incremental global coverage
+
+`tiling.mode: global` builds a worldwide grid **programmatically** from population
+data instead of hand-listed regions or a uniform world grid. See
+`config/tiling_config_global.yaml`.
+
+**How it works** (`src/extract/global_tiling.py`):
+
+- **Data source:** GeoNames *cities1000* — every settlement on Earth with
+  population ≥ 1000 (144,563 points) — bundled offline inside the
+  `reverse_geocoder` package (no download). City points are a proxy for both
+  *inhabited land* (a grid cell with no cities is ocean/desert/wilderness and is
+  skipped — empirically ~86% of 1° cells) and *population density* (the count of
+  cities in an area).
+- **Adaptive cell size:** each populated 1° "supercell" is counted and mapped
+  through `density_bands` to a Mapillary-safe cell size — denser → finer. The
+  defaults (validated live): ≥100 cities → 0.02°, ≥30 → 0.03°, ≥8 → 0.05°,
+  ≥1 → 0.08°. So Paris/London/NYC tile at 0.02° while rural land tiles at 0.08°.
+  Sizes stay under Mapillary's 0.01 sq-degree bbox-area limit, and a cell the API
+  still rejects (too dense, or too large) is auto-subdivided and retried.
+- **Ordering:** `spread` (default) emits one tile per supercell per pass, densest
+  first, so a bounded run samples many places worldwide rather than exhausting a
+  single metro. `density` concentrates on the biggest cities first. Both are fully
+  deterministic.
+
+**Running it incrementally.** A real global build is far too large for one run, so
+bound each session and repeat — the checkpoint store skips `completed` tiles, so
+successive sessions resume and never re-query finished work:
+
+```bash
+export GALLERY_HOME=/path/to/gallery-pipeline
+export AIRFLOW_HOME=~/airflow-gallery
+export GALLERY_CONFIG=config/tiling_config_global.yaml   # set bounds: null for worldwide
+
+# Run this repeatedly (e.g. from cron or a loop). Each invocation advances the
+# global frontier by at most max_tiles_per_run tiles / max_runtime_seconds seconds.
+while true; do
+  airflow dags test gallery_etl "$(date +%Y-%m-%d)"
+  # ...stop when satisfied, or sleep between sessions to respect API limits
+done
+```
+
+Bound each session two ways (either or both, in the YAML):
+
+- `tiling.max_tiles_per_run` — hard tile budget per invocation.
+- `extract.max_runtime_seconds` — wall-clock budget; extraction stops cleanly
+  after the current tile and leaves the rest pending (`extract` reports
+  `stopped_early: true`). `0` disables the limit.
+
+Each session runs the full `extract → … → quality_check` chain, so it also
+publishes a new gallery version incorporating everything gathered so far. Inspect
+the global frontier at any time:
+
+```bash
+sqlite3 data/global-test/catalog.db \
+  "select status, count(*) from tiles group by status;"
 ```
 
 ## Gallery versions and quality reports
