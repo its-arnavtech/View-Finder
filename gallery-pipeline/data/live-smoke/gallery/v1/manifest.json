@@ -1,0 +1,25 @@
+{
+  "build_timestamp": "2026-07-23T04:13:50.348682+00:00",
+  "embedding_dimension": 512,
+  "embedding_model": "open_clip:ViT-B-32:laion2b_s34b_b79k",
+  "files": {
+    "index": "gallery.faiss",
+    "metadata": "metadata.parquet"
+  },
+  "geographic_coverage": {
+    "North America": 140
+  },
+  "quality_checked_at": "2026-07-23T04:13:50.786297+00:00",
+  "status": "quality_passed",
+  "tile_ids": [
+    "chicago_loop_p41d87_m87d63_p0d01",
+    "chicago_loop_p41d87_m87d64_p0d01",
+    "chicago_loop_p41d87_m87d65_p0d01",
+    "chicago_loop_p41d88_m87d63_p0d01",
+    "chicago_loop_p41d88_m87d64_p0d01",
+    "chicago_loop_p41d88_m87d65_p0d01"
+  ],
+  "tiles_covered": 6,
+  "total_image_count": 140,
+  "version": 1
+}

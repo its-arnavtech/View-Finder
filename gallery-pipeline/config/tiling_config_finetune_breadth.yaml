@@ -1,0 +1,77 @@
+# Worldwide breadth pull for GeoCLIP location-encoder fine-tuning.
+#
+# Purpose differs from the retrieval-gallery configs. Those want many images per
+# place so the FAISS gallery has redundant views to match against. Fine-tuning
+# the location encoder wants the opposite: as many *distinct locations* as
+# possible, with few images each.
+#
+# Measured rationale (finetune/assess_pool_diversity.py): the existing 1941-image
+# pool collapses to only 325 spatially distinct locations at >=100 m spacing, and
+# the batch01 training set of 1365 images collapsed to 184. That low location
+# diversity -- not image count -- is what made batch01 overfit within two epochs.
+#
+#   export GALLERY_CONFIG=config/tiling_config_finetune_breadth.yaml
+#
+# Resumable: the checkpoint store skips completed tiles, so repeated bounded runs
+# accumulate coverage without re-querying finished work.
+
+paths:
+  data_dir: data/finetune-breadth
+
+tiling:
+  mode: global
+
+  supercell_degrees: 1.0
+
+  # "spread" emits one tile per populated supercell per pass, so a bounded run
+  # samples many places worldwide instead of exhausting one metro. This is the
+  # single most important setting for this config's purpose.
+  ordering: spread
+
+  density_bands:
+    - [100, 0.02]   # major metros
+    - [30, 0.03]    # large cities
+    - [8, 0.05]     # towns / suburbia
+    - [1, 0.08]     # rural but inhabited
+
+  # Worldwide: no bounding window.
+  bounds: null
+
+  subdivision_factor: 2
+  max_subdivision_depth: 3
+
+  # First fine-tuning batch. Raise for subsequent batches; completed tiles are
+  # skipped on resume.
+  max_tiles_per_run: 400
+
+extract:
+  page_size: 25
+
+  # Breadth over depth. The gallery configs use 20; 6 here means a fixed tile
+  # budget buys ~3x more distinct locations for the same image count.
+  max_images_per_tile: 6
+
+  request_timeout_seconds: 60
+  min_request_interval_seconds: 1.0
+  max_http_attempts: 5
+  backoff_base_seconds: 2.0
+
+  # Wall-clock budget so a session cannot run away.
+  max_runtime_seconds: 1500
+
+validate:
+  perceptual_hash_distance: 6
+
+transform:
+  max_images_per_tile: 6
+  blur_variance_threshold: 75.0
+  exclude_likely_indoor: true
+  embedding_model: ViT-B-32
+  embedding_pretrained: laion2b_s34b_b79k
+  embedding_batch_size_gpu: 32
+  embedding_batch_size_cpu: 8
+
+quality_check:
+  minimum_total_images: 1
+  expected_regions: []
+  minimum_region_fraction: 0.01

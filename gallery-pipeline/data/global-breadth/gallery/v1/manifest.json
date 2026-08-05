@@ -1,0 +1,23 @@
+{
+  "build_timestamp": "2026-07-24T04:33:52.403258+00:00",
+  "embedding_dimension": 512,
+  "embedding_model": "open_clip:ViT-B-32:laion2b_s34b_b79k",
+  "files": {
+    "index": "gallery.faiss",
+    "metadata": "metadata.parquet"
+  },
+  "geographic_coverage": {
+    "Europe": 25,
+    "Oceania": 15
+  },
+  "quality_checked_at": "2026-07-24T04:33:52.947577+00:00",
+  "status": "quality_passed",
+  "tile_ids": [
+    "global_0773_p50d0_p7d0_p0d02",
+    "global_0791_m7d0_p111d0_p0d02",
+    "global_0939_p45d0_p9d0_p0d02"
+  ],
+  "tiles_covered": 3,
+  "total_image_count": 40,
+  "version": 1
+}

@@ -1,0 +1,89 @@
+# Targeted pull into continents the pool does not cover at all.
+#
+# A coverage audit (scripts/audit_coverage.py) found the pool is 2187 images in
+# North America and 1155 in Europe, against 33 in South/SE Asia, 24 in North/East
+# Asia, 18 in Oceania, and ZERO in Africa and South America.
+#
+# Worldwide `bounds: null` with `ordering: spread` does not fix that on its own:
+# spread emits one tile per populated supercell ordered by city density, so the
+# budget keeps landing in the dense European and North American metros that are
+# already represented. scripts/pull_new_regions.py therefore drives this config
+# once per target continent with an explicit `bounds` window, so each gets its
+# own guaranteed share of the run.
+#
+#   python scripts/pull_new_regions.py --seconds-per-region 600
+#
+# Resumable: completed tiles are checkpointed and skipped, so repeated runs
+# accumulate coverage rather than repeating work.
+
+paths:
+  data_dir: data/new-regions
+
+tiling:
+  mode: global
+  supercell_degrees: 1.0
+
+  # One tile per populated supercell per pass. Within a bounded continent window
+  # this spreads the budget across many countries instead of exhausting one city.
+  ordering: spread
+
+  density_bands:
+    - [100, 0.02]   # major metros
+    - [30, 0.03]    # large cities
+    - [8, 0.05]     # towns / suburbia
+    - [1, 0.08]     # rural but inhabited
+
+  # Overridden per region by pull_new_regions.py.
+  bounds: null
+
+  # Depth 1, not the usual 3. A dense metro that subdivides to depth 3 becomes 64
+  # sub-cells that mostly return nothing, and on the previous worldwide pull one
+  # such tile (Cologne) consumed a large share of a 500-tile budget. Breadth wants
+  # many places, not exhaustive coverage of one, so give up subdividing early.
+  subdivision_factor: 2
+  max_subdivision_depth: 1
+
+  max_tiles_per_run: 400
+
+extract:
+  page_size: 25
+
+  # Breadth over depth: more distinct locations per image downloaded.
+  max_images_per_tile: 6
+
+  request_timeout_seconds: 60
+  min_request_interval_seconds: 1.0
+  max_http_attempts: 5
+  # Transport failures now have their own budget, so a burst of density-rejection
+  # 500s cannot leave a transient connection reset with no attempts left.
+  max_transport_attempts: 5
+  backoff_base_seconds: 2.0
+
+  # Isolated tile failures no longer abort the run; a streak still does.
+  max_consecutive_tile_failures: 8
+
+  # With max_subdivision_depth: 1, a dense metro can still be rejected after its
+  # one subdivision. For a breadth pull that is a tile to skip, not a config
+  # error -- we want many places, not exhaustive coverage of Lima. Gallery builds
+  # leave this False so an undividable tile still fails loudly.
+  skip_unsubdividable_tiles: true
+
+  # Per-region wall clock, set by pull_new_regions.py.
+  max_runtime_seconds: 600
+
+validate:
+  perceptual_hash_distance: 6
+
+transform:
+  max_images_per_tile: 6
+  blur_variance_threshold: 75.0
+  exclude_likely_indoor: true
+  embedding_model: ViT-B-32
+  embedding_pretrained: laion2b_s34b_b79k
+  embedding_batch_size_gpu: 32
+  embedding_batch_size_cpu: 8
+
+quality_check:
+  minimum_total_images: 1
+  expected_regions: []
+  minimum_region_fraction: 0.01

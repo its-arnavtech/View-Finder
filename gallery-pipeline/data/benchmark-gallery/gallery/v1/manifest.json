@@ -1,0 +1,33 @@
+{
+  "build_timestamp": "2026-07-24T22:18:09.413545+00:00",
+  "duplicates_dropped": 0,
+  "embedding_dimension": 512,
+  "embedding_model": "open_clip:ViT-B-32:laion2b_s34b_b79k",
+  "files": {
+    "index": "gallery.faiss",
+    "metadata": "metadata.parquet"
+  },
+  "geographic_coverage": {
+    "North America": 1719
+  },
+  "merged_from": [
+    {
+      "images": 140,
+      "source": "gallery-pipeline/data/live-smoke/gallery/v1",
+      "version": 1
+    },
+    {
+      "images": 1305,
+      "source": "gallery-pipeline/data/target-regions/gallery/v2",
+      "version": 2
+    },
+    {
+      "images": 274,
+      "source": "gallery-pipeline/data/global-test/gallery/v1",
+      "version": 1
+    }
+  ],
+  "status": "merged_for_benchmark",
+  "total_image_count": 1719,
+  "version": 1
+}

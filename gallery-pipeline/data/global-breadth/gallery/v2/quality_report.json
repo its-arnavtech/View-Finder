@@ -1,0 +1,29 @@
+{
+  "checked_at": "2026-07-24T04:38:23.656331+00:00",
+  "checks": {
+    "artifact_integrity": {
+      "message": "Manifest, FAISS index, and metadata are readable",
+      "status": "pass"
+    },
+    "duplicate_image_ids": {
+      "message": "All image_id values are unique",
+      "status": "pass"
+    },
+    "embedding_consistency": {
+      "message": "All vectors have dimension 512 and finite values",
+      "status": "pass"
+    },
+    "geographic_distribution": {
+      "message": "Coverage: {'Europe': 96, 'Oceania': 15}",
+      "status": "pass"
+    },
+    "row_count": {
+      "message": "All artifacts contain 111 images",
+      "status": "pass"
+    }
+  },
+  "critical_failures": [],
+  "passed": true,
+  "version": 2,
+  "warnings": []
+}

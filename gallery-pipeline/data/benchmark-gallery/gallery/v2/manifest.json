@@ -1,0 +1,53 @@
+{
+  "build_timestamp": "2026-08-05T19:03:58.969729+00:00",
+  "duplicates_dropped": 13,
+  "embedding_dimension": 512,
+  "embedding_model": "open_clip:ViT-B-32:laion2b_s34b_b79k",
+  "files": {
+    "index": "gallery.faiss",
+    "metadata": "metadata.parquet"
+  },
+  "geographic_coverage": {
+    "Africa": 79,
+    "Asia": 200,
+    "Europe": 1055,
+    "North America": 1870,
+    "Oceania": 59,
+    "South America": 51
+  },
+  "merged_from": [
+    {
+      "images": 140,
+      "source": "gallery-pipeline/data/live-smoke/gallery/v1",
+      "version": 1
+    },
+    {
+      "images": 1305,
+      "source": "gallery-pipeline/data/target-regions/gallery/v2",
+      "version": 2
+    },
+    {
+      "images": 274,
+      "source": "gallery-pipeline/data/global-test/gallery/v1",
+      "version": 1
+    },
+    {
+      "images": 222,
+      "source": "gallery-pipeline/data/global-breadth/gallery/v4",
+      "version": 4
+    },
+    {
+      "images": 1061,
+      "source": "gallery-pipeline/data/finetune-breadth/gallery/v1",
+      "version": 1
+    },
+    {
+      "images": 325,
+      "source": "gallery-pipeline/data/new-regions/gallery/v1",
+      "version": 1
+    }
+  ],
+  "status": "merged_for_benchmark",
+  "total_image_count": 3314,
+  "version": 1
+}
