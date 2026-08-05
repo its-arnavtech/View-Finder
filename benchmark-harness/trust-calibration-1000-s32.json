@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "agreement_radius_km": 200.0,
+  "minimum_models": 2,
+  "evaluation_samples": 1000,
+  "accepted_samples": 223,
+  "coverage": 0.223,
+  "success_definition_km": 200.0,
+  "successful_samples": 73,
+  "observed_success_rate": 0.3273542600896861,
+  "wilson_lower_bound": 0.2691434505504932,
+  "confidence_level": 0.95,
+  "required_success_rate": 0.95,
+  "accepted_for_runtime": false,
+  "benchmark_sha256": "480b49f0d7348b9498c98743963df4941d5ff7d10de04b7edac9ba6c300c52ab",
+  "predictors": [
+    "geoclip",
+    "plonk-osv",
+    "plonk-yfcc"
+  ],
+  "note": "Valid only for this fixed rule and a benchmark not used to choose its thresholds. Recalibrate whenever models, data, or preprocessing change."
+}

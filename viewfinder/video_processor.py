@@ -34,7 +34,8 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 # Extensions routed to this module by the CLI.
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
+# Re-exported from formats.py, the single source of truth for accepted inputs.
+from .formats import VIDEO_EXTENSIONS  # noqa: F401
 
 # Defaults. These are deliberately permissive: it is better to hand the model a
 # mediocre frame than to hand it nothing at all.

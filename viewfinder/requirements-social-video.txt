@@ -1,0 +1,2 @@
+# Public Instagram/TikTok URL ingestion. FFmpeg must also be available on PATH.
+yt-dlp==2026.7.4

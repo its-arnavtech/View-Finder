@@ -39,7 +39,8 @@ from .aggregator import Candidate, FramePrediction
 
 logger = logging.getLogger(__name__)
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+# Re-exported from formats.py, the single source of truth for accepted inputs.
+from .formats import IMAGE_EXTENSIONS  # noqa: F401
 
 # Optional custom GPS gallery, selectable without code changes.
 GALLERY_ENV = "VIEWFINDER_GALLERY"

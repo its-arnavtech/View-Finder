@@ -1,0 +1,7 @@
+# Optional online evidence for --predictor hybrid --online-evidence.
+# Install after viewfinder/requirements.txt.
+#
+# Images are uploaded to Google Cloud Vision, and OCR-derived place queries are
+# sent to Google Places Text Search. Both services may require billing.
+google-cloud-vision==3.15.0
+requests==2.34.2

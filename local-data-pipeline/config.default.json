@@ -1,0 +1,41 @@
+{
+  "data_root": "local-data",
+  "user_agent": "ViewFinderLocalEvidence/1.0 (https://github.com/its-arnavtech/View-Finder)",
+  "landmarks": {
+    "storage_budget_gb": 40,
+    "thumbnail_width": 1024,
+    "max_images": 250000,
+    "images_per_target": 5,
+    "us_target_limit": 30000,
+    "world_target_limit": 20000,
+    "seed_geoname_ids": [
+      5075632,
+      5075633,
+      5695448,
+      5695449,
+      146286
+    ],
+    "seed_targets": [
+      {
+        "geoname_id": -1,
+        "name": "Morphou Bay",
+        "lat": 35.25,
+        "lon": 32.8333333,
+        "country_code": "CY",
+        "admin1_code": "04",
+        "feature_class": "H",
+        "feature_code": "BAY"
+      }
+    ],
+    "commons_request_delay_seconds": 0.2,
+    "download_workers": 4,
+    "model_name": "ViT-B-32",
+    "pretrained": "laion2b_s34b_b79k",
+    "batch_size_gpu": 64,
+    "batch_size_cpu": 16
+  },
+  "osm_regions": {
+    "nebraska": "https://download.geofabrik.de/north-america/us/nebraska-latest.osm.pbf",
+    "cyprus": "https://download.geofabrik.de/europe/cyprus-latest.osm.pbf"
+  }
+}

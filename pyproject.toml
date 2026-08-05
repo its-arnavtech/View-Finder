@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "view-finder-geolocation"
+version = "0.2.0"
+description = "Local-first, fail-closed image and video geolocation CLI"
+readme = "README.md"
+requires-python = ">=3.11"
+
+[project.scripts]
+view-finder = "viewfinder.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["viewfinder*"]

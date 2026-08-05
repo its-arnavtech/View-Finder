@@ -1,0 +1,12 @@
+# Optional runtime for --predictor plonk-osv / plonk-yfcc / trusted.
+#
+# Install the PLONK package itself without dependency resolution first:
+#   python -m pip install --no-deps diff-plonk==0.4
+# then install this file after viewfinder/requirements.txt. diff-plonk 0.4 pins
+# an old SciPy release that has no Python 3.13 wheel; View Finder's tested
+# environment works with the newer SciPy already resolved by the core stack.
+geoopt==0.5.1
+torchdiffeq==0.2.5
+einops==0.8.2
+accelerate==1.14.0
+
