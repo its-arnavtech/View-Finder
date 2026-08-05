@@ -1,0 +1,5 @@
+run_name,training_locations,best_epoch,useful_steps,n,held_out_median_error_before_km,held_out_median_error_after_km,pct_improvement,sign_test_z,result
+batch01_es,184,1,20,236,126.53,40.48,68.01,,in_distribution_improvement
+breadth01,543,5,48,96,270.58,117.49,56.58,,in_distribution_improvement
+breadth02,730,7,88,129,286.16,160.33,43.97,,in_distribution_improvement
+external_transfer,,,,1000,1292.53,1438.07,-11.26,-0.22,null_effect

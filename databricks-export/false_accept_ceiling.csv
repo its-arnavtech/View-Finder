@@ -1,0 +1,3 @@
+gallery_version,gallery_size,out_of_coverage_max_similarity,out_of_coverage_mean_similarity,out_of_coverage_p99_similarity,in_coverage_median_similarity,in_coverage_n,trust_threshold,external_images_above_threshold,external_images_total,in_coverage_above_threshold
+v1,1719,0.8029,0.6683,0.7774,0.8506,24,0.825,0,1000,15
+v2,3314,0.8296,0.7035,0.8034,0.8629,93,0.825,1,1000,68
