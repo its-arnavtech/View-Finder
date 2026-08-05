@@ -81,7 +81,18 @@ def run_extract(config: dict[str, Any], client: MapillaryClient | None = None) -
     )
     selected = select_pending_tiles(config, store)
     completed: list[str] = []
+    failed: list[str] = []
     total_new = 0
+    # An isolated tile failure is survivable; a streak of them is not. Above this
+    # many back-to-back failures the run stops, on the assumption that the fault
+    # is systemic (revoked token, network down, API outage) rather than one bbox.
+    max_consecutive_failures = int(extract.get("max_consecutive_tile_failures", 8))
+    consecutive_failures = 0
+    aborted_early = False
+    # Breadth pulls run a shallow subdivision depth on purpose, so a metro too
+    # dense to divide further is an expected skip rather than a misconfiguration.
+    # Default False keeps gallery builds fail-fast.
+    skip_unsubdividable = bool(extract.get("skip_unsubdividable_tiles", False))
     cap = int(extract.get("max_images_per_tile", 500))
     max_depth = int(config["tiling"].get("max_subdivision_depth", 3))
     subdivision_factor = int(config["tiling"].get("subdivision_factor", 2))
@@ -187,11 +198,49 @@ def run_extract(config: dict[str, Any], client: MapillaryClient | None = None) -
                     continue
             store.mark_tile(tile.tile_id, "failed", found, str(exc)[:1000])
             LOGGER.exception("Extraction failed for tile=%s after %d images", tile.tile_id, found)
-            raise
+
+            if _is_subdividable_rejection(exc) and not skip_unsubdividable:
+                # Reaching here means the bbox is too dense AND subdivision depth
+                # is exhausted. For a gallery build that is a configuration
+                # problem -- the density bands or max_subdivision_depth cannot
+                # represent this area -- and continuing would silently drop
+                # coverage, so this stays fail-fast by default, as it always has.
+                #
+                # Breadth pulls invert that trade-off: they want many distinct
+                # places, not exhaustive coverage of one, and deliberately run a
+                # shallow max_subdivision_depth. There an undividable metro is a
+                # tile to skip, not a misconfiguration, so they set
+                # extract.skip_unsubdividable_tiles to keep the run going.
+                raise
+
+            # Anything else is a transient fault (connection reset, timeout, an
+            # unexpected status) and must not discard the rest of the run. Every
+            # completed tile is already durable in the checkpoint store, so
+            # aborting threw away hours of good work over one bad bbox -- exactly
+            # what a connection reset did to a 500-tile pull. Failed tiles stay
+            # marked failed and are retried by a later run, so nothing is lost.
+            consecutive_failures += 1
+            failed.append(tile.tile_id)
+            if consecutive_failures >= max_consecutive_failures:
+                # A run of back-to-back failures is a systemic problem (token
+                # revoked, network down, API outage) rather than a bad tile, and
+                # continuing would just burn the remaining budget failing.
+                LOGGER.error(
+                    "Aborting: %d consecutive tile failures suggests a systemic fault, not a bad tile",
+                    consecutive_failures,
+                )
+                aborted_early = True
+                break
+            continue
+        else:
+            consecutive_failures = 0
     return {
         "tile_ids": completed,
         "tiles_completed": len(completed),
+        "failed_tile_ids": failed,
+        "tiles_failed": len(failed),
         "new_images": total_new,
         "subdivisions": subdivisions,
         "stopped_early": stopped_early,
+        "aborted_early": aborted_early,
     }

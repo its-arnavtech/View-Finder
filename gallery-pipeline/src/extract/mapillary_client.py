@@ -23,6 +23,11 @@ GRAPH_IMAGES_URL = "https://graph.mapillary.com/images"
 # scrubbed. Matches both raw and percent-encoded pipe separators.
 _TOKEN_QUERY = re.compile(r"(access_token=)[^&\s]+", re.IGNORECASE)
 
+# Statuses worth another attempt: rate limiting and the 5xx family. Mapillary
+# also returns 500 for "too much data in this bbox", which the runner turns into
+# a subdivision rather than a failure once the retries are exhausted.
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
 
 def redact(text: str) -> str:
     """Replace any access token embedded in a URL or message with a placeholder."""
@@ -38,6 +43,7 @@ class MapillaryClient:
         request_timeout: float = 30,
         min_request_interval: float = 0.25,
         max_attempts: int = 6,
+        max_transport_attempts: int | None = None,
         backoff_base: float = 1.0,
         session: requests.Session | None = None,
     ):
@@ -48,6 +54,11 @@ class MapillaryClient:
         self.request_timeout = request_timeout
         self.min_request_interval = min_request_interval
         self.max_attempts = max_attempts
+        # Transport failures get their own budget so a burst of HTTP 500s cannot
+        # leave a transient connection reset with no attempts left.
+        self.max_transport_attempts = (
+            max_attempts if max_transport_attempts is None else max_transport_attempts
+        )
         self.backoff_base = backoff_base
         self.session = session or requests.Session()
         # Authenticate with a header rather than an ?access_token= query parameter.
@@ -88,30 +99,63 @@ class MapillaryClient:
             ) from None
 
     def _request(self, url: str, **kwargs: Any) -> requests.Response:
-        for attempt in range(1, self.max_attempts + 1):
+        """GET with retries, budgeting transport and status failures separately.
+
+        Transport failures (``ConnectionError``, ``Timeout``,
+        ``ChunkedEncodingError`` -- all subclasses of ``RequestException``) and
+        retryable HTTP statuses are both retried with exponential backoff, but
+        they draw from *independent* budgets.
+
+        Sharing one counter looked reasonable and was not: a dense tile that
+        spends four attempts on Mapillary's 500 "reduce the amount of data"
+        rejection had nothing left when the fifth attempt hit a transient
+        connection reset, so the reset re-raised immediately and aborted a
+        500-tile pull. The two failure modes are unrelated -- a server-side
+        density rejection says nothing about link stability -- so exhausting one
+        budget must not consume the other.
+
+        Both counters increase monotonically and neither resets, so the loop is
+        bounded by ``max_attempts + max_transport_attempts`` iterations.
+        """
+        status_attempt = 0
+        transport_attempt = 0
+
+        while True:
             self._wait_for_rate_limit()
             try:
                 response = self.session.get(url, timeout=self.request_timeout, **kwargs)
                 self._last_request_at = time.monotonic()
             except requests.RequestException as exc:
-                if attempt == self.max_attempts:
+                transport_attempt += 1
+                if transport_attempt >= self.max_transport_attempts:
                     raise type(exc)(redact(exc)) from None
-                delay = self.backoff_base * (2 ** (attempt - 1)) + random.uniform(0, 0.25)
-                LOGGER.warning("Mapillary request failed; retrying in %.2fs (attempt %d/%d)", delay, attempt, self.max_attempts)
+                delay = self.backoff_base * (2 ** (transport_attempt - 1)) + random.uniform(0, 0.25)
+                LOGGER.warning(
+                    "Mapillary request failed (%s); retrying in %.2fs (transport attempt %d/%d)",
+                    type(exc).__name__, delay, transport_attempt, self.max_transport_attempts,
+                )
                 time.sleep(delay)
                 continue
 
-            if response.status_code not in {429, 500, 502, 503, 504}:
+            if response.status_code not in RETRYABLE_STATUS_CODES:
                 self._raise_for_status(response)
                 return response
-            if attempt == self.max_attempts:
+
+            status_attempt += 1
+            if status_attempt >= self.max_attempts:
                 self._raise_for_status(response)
             retry_after = response.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after and retry_after.isdigit() else self.backoff_base * (2 ** (attempt - 1))
+            delay = (
+                float(retry_after)
+                if retry_after and retry_after.isdigit()
+                else self.backoff_base * (2 ** (status_attempt - 1))
+            )
             delay += random.uniform(0, 0.25)
-            LOGGER.warning("Mapillary returned HTTP %d; retrying in %.2fs (attempt %d/%d)", response.status_code, delay, attempt, self.max_attempts)
+            LOGGER.warning(
+                "Mapillary returned HTTP %d; retrying in %.2fs (status attempt %d/%d)",
+                response.status_code, delay, status_attempt, self.max_attempts,
+            )
             time.sleep(delay)
-        raise RuntimeError("Unreachable retry state")
 
     def iter_images(self, tile: Tile, max_images: int | None = None) -> Iterator[dict[str, Any]]:
         params: dict[str, Any] | None = {
