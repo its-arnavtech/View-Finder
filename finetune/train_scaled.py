@@ -143,6 +143,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(default: %(default)s)")
     parser.add_argument("--external-sample", type=int, default=1000,
                         help="images sampled from benchmark-data/manifest.csv")
+    parser.add_argument("--init-checkpoint", default=None, metavar="PATH",
+                        help="start from a saved location encoder instead of pretrained "
+                             "GeoCLIP, to accumulate across shards. Baselines are still "
+                             "measured on pretrained weights first, so the reported "
+                             "deltas stay comparable with every unchained run")
     parser.add_argument("--discard-after", action="store_true",
                         help="delete this batch's raw images once the checkpoint is written")
     parser.add_argument("--no-amp", action="store_true")
@@ -295,6 +300,42 @@ def main() -> None:
                 "note": "untouched pretrained baseline"},
                os.path.join(ckpt_dir, "location_encoder_pretrained.pth"))
 
+    # ---- 6b. Optionally chain from a previous shard's checkpoint ----
+    #
+    # Loaded *after* both baselines are measured, deliberately. The probe's
+    # baseline stays untouched pretrained GeoCLIP, so this run's deltas and
+    # sign tests remain directly comparable with every unchained run rather
+    # than being measured against a moving reference. The chained starting
+    # point is reported separately below.
+    init_report: dict | None = None
+    if args.init_checkpoint:
+        if not os.path.isfile(args.init_checkpoint):
+            raise SystemExit(f"--init-checkpoint not found: {args.init_checkpoint}")
+        state = torch.load(args.init_checkpoint, map_location=device)
+        model.location_encoder.load_state_dict(state["location_encoder"])
+        start_val = evaluate(model, val_features, val_coords, gps_gallery, device)
+        start_external = probe.measure() if probe is not None else None
+        init_report = {
+            "path": args.init_checkpoint,
+            "source_step": state.get("step"),
+            "source_epoch": state.get("epoch"),
+            "indist_at_start": tb._clean(start_val),
+            "external_at_start": (
+                {k: v for k, v in start_external.items() if k != "_errors"}
+                if start_external else None
+            ),
+        }
+        print(f"\nCHAINED START from {os.path.basename(args.init_checkpoint)} "
+              f"(step {state.get('step')})")
+        print(f"  held-out at start : {start_val['median_error_km']:.2f} km "
+              f"(pretrained {before_val['median_error_km']:.2f})")
+        if start_external is not None and probe is not None:
+            delta = start_external["median_error_km"] - probe.baseline["median_error_km"]
+            print(f"  EXTERNAL at start : {start_external['median_error_km']:.2f} km "
+                  f"({delta:+.2f} vs pretrained), acc@200km "
+                  f"{start_external['acc_200km']:.4f}")
+            print("  training must beat THIS to show accumulation, not merely beat pretrained.")
+
     # ---- 7. Train, probing the independent set on the way ----
     selectors = [
         CheckpointSelector(
@@ -428,6 +469,7 @@ def main() -> None:
         "val_locations": int(len(val_frame)),
         "separation_check": check,
         "held_out_baseline": tb._clean(before_val),
+        "init_checkpoint": init_report,
         "selection_metric_driving_early_stop": args.checkpoint_select_metric,
         "selectors": [selector.as_dict() for selector in selectors],
         # Both selected checkpoints, each scored on BOTH metrics. This is the
