@@ -80,6 +80,9 @@ from typing import Any, Sequence
 
 from PIL import Image
 
+# Absolute import: moved out of the viewfinder package when shelved.
+from viewfinder.progress import report as _report_progress
+
 logger = logging.getLogger(__name__)
 
 # Above this top-1 cosine similarity, retrieval's answer leads. Calibrated, not
@@ -176,6 +179,43 @@ class EnsembleGeolocator:
         self.retrieval = retrieval
         self.trust_threshold = trust_threshold
         self.mention_floor = mention_floor
+        self.last_decision: EnsembleDecision | None = None
+        """Routing rationale for the most recent prediction, so a caller can
+        report *which* predictor produced the answer. For a video this is the
+        decision for the last frame; :attr:`decisions` keeps all of them."""
+        self.decisions: list[EnsembleDecision] = []
+
+    @property
+    def info(self) -> Any:
+        """Expose retrieval's gallery provenance.
+
+        The ensemble is a composing layer with no gallery of its own, but the
+        gallery it consults is the retrieval side's, and callers that report
+        gallery details should see it rather than silently nothing.
+        """
+        return getattr(self.retrieval, "info", None)
+
+    def routing_summary(self) -> dict[str, Any]:
+        """Aggregate routing across every image/frame predicted so far."""
+        if not self.decisions:
+            return {}
+        routed = [decision.routed_to for decision in self.decisions]
+        similarities = [
+            decision.top_similarity
+            for decision in self.decisions
+            if decision.top_similarity is not None
+        ]
+        summary: dict[str, Any] = {
+            "routed_to": max(set(routed), key=routed.count),
+            "trust_threshold": self.trust_threshold,
+            "mention_floor": self.mention_floor,
+            "reason": self.decisions[-1].reason,
+            "frames_routed_to_retrieval": routed.count("retrieval"),
+            "frames_routed_to_geoclip": routed.count("geoclip"),
+        }
+        if similarities:
+            summary["max_top_similarity"] = round(max(similarities), 4)
+        return summary
 
     # -- decision ---------------------------------------------------------
 
@@ -267,8 +307,14 @@ class EnsembleGeolocator:
         for geo_candidates, ret_candidates in zip(geo_batch, ret_batch):
             ranked, decision = self._merge(geo_candidates, ret_candidates, top_k)
             logger.debug("ensemble routed to %s: %s", decision.routed_to, decision.reason)
+            self._record(decision)
             merged.append(ranked)
         return merged
+
+    def _record(self, decision: EnsembleDecision) -> None:
+        """Retain the routing rationale so callers can report the source used."""
+        self.last_decision = decision
+        self.decisions.append(decision)
 
     def predict_image(self, image: Image.Image, top_k: int = DEFAULT_TOP_K) -> list[EnsembleCandidate]:
         """Run both predictors over one image."""
@@ -283,22 +329,28 @@ class EnsembleGeolocator:
 
         geo_batch = self.geoclip.predict_batch(images, top_k=top_k)
         ret_batch = self.retrieval.predict_batch(images, top_k=top_k)
-        return [
-            self._merge(geo_candidates, ret_candidates, top_k)
-            for geo_candidates, ret_candidates in zip(geo_batch, ret_batch)
-        ]
+        merged: list[tuple[list[EnsembleCandidate], EnsembleDecision]] = []
+        for geo_candidates, ret_candidates in zip(geo_batch, ret_batch):
+            ranked, decision = self._merge(geo_candidates, ret_candidates, top_k)
+            self._record(decision)
+            merged.append((ranked, decision))
+        return merged
 
     def predict_frames(
         self,
         frames: Sequence[Any],
         top_k: int = DEFAULT_TOP_K,
         batch_size: int = 32,
-        progress: bool = False,
+        progress: Any = False,
     ) -> list[Any]:
         """Predict for video frames, batching to bound peak memory.
 
         Delegates frame handling to the same shape the other predictors use so
         the video pipeline needs no ensemble-specific branch.
+
+        Args:
+            progress: ``True`` to log a line per batch, or a ``(done, total)``
+                callable to drive a progress bar or GUI.
         """
         from viewfinder.aggregator import FramePrediction
 
@@ -309,10 +361,17 @@ class EnsembleGeolocator:
             for frame, candidates in zip(chunk, batch):
                 predictions.append(
                     FramePrediction(
-                        index=frame.index,
+                        frame_index=frame.index,
                         timestamp=frame.timestamp,
                         blur_score=frame.blur_score,
                         candidates=list(candidates),
                     )
                 )
+            _report_progress(
+                progress,
+                len(predictions),
+                len(frames),
+                logger=logger,
+                message="Ensemble-geolocated %d/%d frames",
+            )
         return predictions

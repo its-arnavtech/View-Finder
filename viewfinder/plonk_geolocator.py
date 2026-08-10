@@ -30,6 +30,7 @@ from PIL import Image
 
 from .aggregator import Candidate, FramePrediction, cluster_candidates
 from .geolocator import resolve_device
+from .progress import report as _report_progress
 
 
 logger = logging.getLogger(__name__)
@@ -227,7 +228,7 @@ class PlonkGeolocator:
         frames: Sequence["FrameLike"],
         top_k: int = 5,
         batch_size: int = DEFAULT_BATCH_SIZE,
-        progress: bool = False,
+        progress: Any = False,
     ) -> list[FramePrediction]:
         """Predict video frames while bounding feature-extractor memory."""
         if batch_size <= 0:
@@ -250,8 +251,13 @@ class PlonkGeolocator:
                         blur_score=frame.blur_score,
                     )
                 )
-            if progress:
-                logger.info("PLONK-geolocated %d/%d frames", len(predictions), len(frames))
+            _report_progress(
+                progress,
+                len(predictions),
+                len(frames),
+                logger=logger,
+                message="PLONK-geolocated %d/%d frames",
+            )
         return predictions
 
 

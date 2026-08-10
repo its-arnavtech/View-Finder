@@ -530,6 +530,176 @@ Supporting checks:
 | `check_location_sampling.py` | validates thinning/split against known data |
 | `verify_eval_parity.py` | our eval vs `GeoCLIP.predict()` |
 
+## Scaled multi-dataset training (`train_scaled.py`)
+
+`train_batch.py` and `train_breadth_batch.py` are tied to one Mapillary source.
+`train_scaled.py` generalizes the same loop to any adapter in `datasets/`, so a
+session can run many sequential batches from different sources without the loop
+changing. Every safeguard is preserved — each was added after a measured
+failure, so none of them is optional:
+
+| safeguard | why it exists |
+|---|---|
+| thin by spacing before anything else | 1365 dense images were 184 distinct places at 100 m; locations, not images, bound this fine-tune |
+| split by location, then **verify** separation | splitting by image leaks near-duplicates and reports a fictitious gain; a violation aborts the run |
+| save-best + early stopping on held-out | with few locations the held-out metric bottoms in ~20 steps then regresses while train loss keeps falling |
+| **periodic** external benchmark | the in-run held-out slice shares the training data's collection biases and structurally cannot detect a transfer failure |
+| VRAM budget assertion | WDDM does not raise CUDA OOM; it spills to system RAM and runs ~50x slower, so peak reserved is checked explicitly |
+
+### Licence gating is enforced in code
+
+Each adapter declares a `LicenceStatus`. `UNCLEAR` and `RESTRICTIVE` sources
+raise on `load()` with the reason and what would unblock them, so a run can
+never quietly ingest data nobody verified:
+
+```
+adapter              licence              usable
+commons-landmarks    clear_after_filter   True
+mapillary-catalog    clear                True
+msls                 unclear              False   <- terms unreadable from any primary source
+yfcc100m             clear_after_filter   False   <- needs an AWS or Yahoo account
+```
+
+See the licence findings in [DATASETS.md](../DATASETS.md).
+
+### The external probe is cheap on purpose
+
+Only the location encoder trains, so external image features are constant for
+the whole run. `external_probe.py` encodes the independent benchmark **once**
+and every later probe re-runs only the location encoder and the gallery lookup —
+seconds, not minutes. That is what makes probing every N epochs affordable, and
+it is why the generalization *trend* is visible during training rather than
+arriving as a single verdict at the end.
+
+Each probe reports the paired sign test, not just the median. The earlier null
+result looked like a 145 km median regression but was 495 of 1000 images
+completely unchanged — an aggregate median moves on a handful of large swings.
+
+```bash
+python train_scaled.py --dataset commons-landmarks --dry-run          # diversity only
+python train_scaled.py --dataset commons-landmarks --batch-size 128   --epochs 20 --external-every-epochs 2 --run-name commons01
+```
+
+`--discard-after` deletes the batch's raw imagery once its checkpoint is
+written, so total disk stays flat across sessions. Adapters backed by data the
+repo already owns (Commons landmarks, committed Mapillary pulls) ignore it.
+
+### Checkpoint selection: default reversed to the external metric (2026-08-09)
+
+**This is a deliberate reversal of the previous behaviour.** Selection used to
+track in-distribution held-out error alone and write one
+`location_encoder_best.pth`. The `commons01` run showed that rule is not merely
+imperfect — over that run the two metrics moved in **opposite directions**:
+
+| epoch | held-out median km | external median km | sign-test z |
+|---|---|---|---|
+| 0 | 324.0 | **1164.6** (best) | +1.74 |
+| 2 | 320.7 | 1199.1 | +1.34 |
+| 4 | **314.3** (best) | 1453.4 | −1.04 |
+| 6 | 326.9 | 1478.7 | −0.90 |
+
+Held-out error bottomed at epoch 4, so save-best shipped epoch 4 — close to the
+run's worst point on the metric that reflects the actual goal. The old rule
+actively selected *against* generalization.
+
+So `--checkpoint-select-metric {indist,external,both}` now defaults to
+**`external`**. What changed and what did not:
+
+- **Both bests are always written**, regardless of the flag:
+  `location_encoder_best_indist.pth` and `location_encoder_best_external.pth`.
+  Neither is forced to be "the" winner, because commons01 shows they can
+  legitimately disagree.
+- **Both trajectories are always printed side by side** at the end of every run,
+  with an `agree` column marking probe intervals where the two metrics moved in
+  opposite directions, plus a one-line divergence verdict. A repeat of this
+  failure is now visible in every run's own report rather than found by accident.
+- The flag chooses **only which metric spends early-stopping patience**.
+- When external drives selection, the probe is forced onto the eval cadence — a
+  selector cannot pick a checkpoint it never scored.
+- A metrics dict missing the external key is **skipped, not counted as a
+  non-improvement**: an absent measurement is not evidence of a worse one.
+
+Callers that pass no `selectors` to `train_one_batch` (i.e. `train_batch.py` and
+`train_breadth_batch.py`) keep the original single-metric behaviour and filename.
+
+### Re-scoring a finished run (`rescore_checkpoints.py`)
+
+Answering "which checkpoint was actually best?" does not need retraining. Only
+the location encoder trains, so for a fixed image set the image features are
+constant: encode the held-out slice and the benchmark once, then swap in each
+saved location encoder. A whole run's epochs score in roughly the time one
+training epoch took.
+
+```bash
+python rescore_checkpoints.py --run-name commons01
+```
+
+It fills in epochs that the probe cadence skipped, re-derives both bests through
+the same `CheckpointSelector` logic training uses, writes them, and saves the
+full dual trajectory to `work/<run>/rescore.json`.
+
+### Dense early probing (`--step-eval-every`)
+
+Epoch-granularity probing is too coarse at the start of a run. In `commons01`
+essentially all external value arrived inside the first epoch's 107 steps and
+was already decaying by epoch 2 — a per-epoch probe cannot locate that optimum
+or even confirm it lies within epoch 0.
+
+`--step-eval-every N` evaluates and probes every N optimizer steps;
+`--step-eval-until M` stops the dense phase after M steps. Mid-epoch points feed
+the selectors exactly like epoch-boundary points, so a step-50 checkpoint can
+win, and each dense probe also writes a `probe`-tagged checkpoint so the run can
+be re-scored later without retraining.
+
+```bash
+python train_scaled.py --dataset osv5m --dataset-arg shard=0   --step-eval-every 10 --step-eval-until 220 --run-name osv5m01
+```
+
+### Early-stopping patience counts EPOCHS, not probes
+
+Patience used to be checked against the selector's probe counter. That is
+correct when there is one evaluation per epoch, and wrong the moment dense
+probing is switched on: `osv5m01` ran 33 probes inside epoch 0, 18 of them
+non-improving, so `--early-stop-patience 3` was exhausted before epoch 1 ever
+started. The run stopped after a single epoch and epochs 1-11 were never seen.
+
+The two things were conflated because they answer different questions on
+different timescales:
+
+- **dense probing** exists to locate the optimum *precisely within* an epoch;
+- **early stopping** exists to decide training has *stopped helping overall*.
+
+So `CheckpointSelector` now carries two clocks. `stale_evals` still counts probe
+events and remains a diagnostic. `stale_epochs` counts epochs that were measured
+and produced no improvement, and that is what spends patience. An epoch counts
+as stale only if the selector was actually measured during it — an epoch where a
+coarser cadence never took an external measurement spends nothing, for the same
+reason a missing measurement is skipped rather than penalised in `offer()`.
+
+**The coarse path is bit-for-bit unaffected.** With one evaluation per epoch the
+two clocks are identical by construction, which `test_coarse_per_epoch_path_is_unchanged`
+asserts directly (`stale_epochs == stale_evals`) — that equivalence is what keeps
+batch01/breadth01/breadth02/commons01 reproducible.
+
+### OSV-5M adapter
+
+`--dataset osv5m --dataset-arg shard=N` pulls one ~50,000-image shard
+(~2.35 GB), joins it against the cached coordinate index, subsamples **before**
+extracting (no point writing 50,000 files for a 20,000-image batch), and on
+`--discard-after` deletes both the extracted images and the shard zip while
+keeping the index.
+
+The index is a one-time build:
+
+```bash
+python datasets/osv5m_index.py work/osv5m/osv5m_index.parquet
+```
+
+It streams the 2.78 GB `train.csv` in resumable range chunks into a 269 MB
+parquet. Required because shard membership is scattered through the CSV — 60 MB
+of it matched only 2.2% of shard 00's ids — so there is no cheap slice that
+resolves one shard's coordinates.
+
 ## On `gpuboost`
 
 `gpuboost doctor` / `benchmark --quick --recommend` / `analyze` / `agent optimize

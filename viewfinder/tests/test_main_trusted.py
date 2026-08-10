@@ -27,7 +27,7 @@ def test_trusted_mode_abstains_without_calibration(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr(
         main,
         "_process_image",
-        lambda input_path, top_k, max_predictions, spec, remove_text_enabled=False: {
+        lambda input_path, top_k, max_predictions, spec, **kwargs: {
             "predictor": spec.key,
             "prediction": {
                 "latitude": points[spec.key][0],

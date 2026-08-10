@@ -14,6 +14,7 @@ from .hybrid_geolocator import extract_exif_gps
 from .local_gazetteer import GeoNamesResolver, PlaceMatch, normalize_name
 from .local_landmarks import LandmarkMatch, LandmarkRetriever
 from .local_ocr import OcrLine, PaddleSceneText
+from .progress import report as _report_progress
 
 
 LOGGER = logging.getLogger(__name__)
@@ -462,7 +463,7 @@ class LocalHybridGeolocator:
         frames: Sequence[Any],
         top_k: int = 5,
         batch_size: int = 1,
-        progress: bool = False,
+        progress: Any = False,
     ) -> list[FramePrediction]:
         """Run fail-closed local evidence independently over sampled video frames."""
         predictions: list[FramePrediction] = []
@@ -493,12 +494,13 @@ class LocalHybridGeolocator:
                         accepted_coordinates.append((candidates[0].lat, candidates[0].lon))
                     elif assessment.decision == "review":
                         review_assessments.append(assessment)
-                if progress:
-                    LOGGER.info(
-                        "Analyzed local evidence for %d/%d frames",
-                        position,
-                        len(frames),
-                    )
+                _report_progress(
+                    progress,
+                    position,
+                    len(frames),
+                    logger=LOGGER,
+                    message="Analyzed local evidence for %d/%d frames",
+                )
         finally:
             self._suppress_prior = False
 

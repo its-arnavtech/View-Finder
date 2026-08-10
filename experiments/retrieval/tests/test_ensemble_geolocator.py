@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from viewfinder.ensemble_geolocator import (
+from ensemble_geolocator import (
     DEFAULT_MENTION_FLOOR,
     DEFAULT_TRUST_THRESHOLD,
     EnsembleGeolocator,

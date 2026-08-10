@@ -38,7 +38,7 @@ DEFAULT_BUCKETS = (0.0, 0.3, 0.5, 0.65, 0.8, 1.01)
 def collect(frame: pd.DataFrame, gallery_path: str, batch_size: int, top_k: int = 5) -> pd.DataFrame:
     """Run both predictors over every image and record top-1 results."""
     from viewfinder.geolocator import GeoLocator
-    from viewfinder.retrieval_geolocator import RetrievalGeolocator
+    from retrieval_geolocator import RetrievalGeolocator
 
     print("loading predictors...", flush=True)
     geoclip = GeoLocator(offline=True)

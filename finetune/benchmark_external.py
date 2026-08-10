@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -79,9 +80,17 @@ def run_geoclip(frame: pd.DataFrame, checkpoint: str | None, device: str, batch_
 
 
 def run_retrieval(frame: pd.DataFrame, gallery_path: str, batch_size: int) -> np.ndarray:
-    """Return predicted coords from the FAISS retrieval predictor (top-1)."""
-    sys.path.insert(0, r"C:\View-Finder")
-    from viewfinder.retrieval_geolocator import RetrievalGeolocator
+    """Return predicted coords from the FAISS retrieval predictor (top-1).
+
+    Only reachable via ``--gallery``. The retrieval predictor was shelved into
+    ``experiments/retrieval/``, so it is imported from there rather than from
+    the viewfinder package, and only when explicitly asked for.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    for path in (str(repo_root), str(repo_root / "experiments" / "retrieval")):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    from retrieval_geolocator import RetrievalGeolocator
 
     predictor = RetrievalGeolocator(gallery_path)
     preds = []

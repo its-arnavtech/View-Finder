@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 # Re-exported from formats.py, the single source of truth for accepted inputs.
 from .formats import IMAGE_EXTENSIONS  # noqa: F401
+from .progress import report as _report_progress
 
 # Optional custom GPS gallery, selectable without code changes.
 GALLERY_ENV = "VIEWFINDER_GALLERY"
@@ -382,7 +383,7 @@ class GeoLocator:
         frames: Sequence["FrameLike"],
         top_k: int = 5,
         batch_size: int = DEFAULT_BATCH_SIZE,
-        progress: bool = False,
+        progress: Any = False,
     ) -> list[FramePrediction]:
         """Score extracted video frames in batches.
 
@@ -391,7 +392,8 @@ class GeoLocator:
                 ``blur_score`` -- i.e. :class:`video_processor.Frame`.
             top_k: Candidates to retain per frame.
             batch_size: Frames per forward pass.
-            progress: Log progress after each batch.
+            progress: ``True`` to log a line per batch, or a
+                ``(done, total)`` callable to drive a progress bar or GUI.
 
         Returns:
             One :class:`FramePrediction` per frame, in input order.
@@ -409,8 +411,13 @@ class GeoLocator:
                         blur_score=frame.blur_score,
                     )
                 )
-            if progress:
-                logger.info("Geolocated %d/%d frames", len(predictions), len(frames))
+            _report_progress(
+                progress,
+                len(predictions),
+                len(frames),
+                logger=logger,
+                message="Geolocated %d/%d frames",
+            )
 
         return predictions
 

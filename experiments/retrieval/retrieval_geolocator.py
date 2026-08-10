@@ -54,7 +54,20 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 from PIL import Image
 
-from .aggregator import Candidate, FramePrediction
+# Absolute imports: this module was moved out of the viewfinder package into
+# experiments/retrieval/ when the predictor was shelved, so relative imports no
+# longer resolve. The OpenCLIP loaders it used to define now live in
+# viewfinder.openclip_support, shared with the still-active hybrid landmark
+# matcher; they are imported rather than copied so the two cannot drift.
+from viewfinder.aggregator import Candidate, FramePrediction
+from viewfinder.openclip_support import (
+    GalleryError,
+    OPEN_CLIP_PREFIX as _OPEN_CLIP_PREFIX,
+    load_model as _load_model,
+    parse_model_spec as _parse_model_spec,
+    resolve_device,
+)
+from viewfinder.progress import report as _report_progress
 
 logger = logging.getLogger(__name__)
 
@@ -72,14 +85,6 @@ DEFAULT_BATCH_SIZE = 8
 INDEX_FILENAME = "gallery.faiss"
 METADATA_FILENAME = "metadata.parquet"
 MANIFEST_FILENAME = "manifest.json"
-
-# Prefix used by the pipeline's `EmbeddingGenerator.full_model_name`.
-_OPEN_CLIP_PREFIX = "open_clip"
-
-
-class GalleryError(RuntimeError):
-    """Raised when a gallery directory is missing, malformed, or inconsistent."""
-
 
 @dataclass
 class GalleryInfo:
@@ -145,32 +150,6 @@ class _LoadedGallery:
 # double-checked-locking discipline as reverse_geocode.py.
 _gallery_cache: dict[str, _LoadedGallery] = {}
 _gallery_lock = threading.Lock()
-
-_model_cache: dict[tuple[str, str, str], tuple[Any, Any]] = {}
-_model_lock = threading.Lock()
-
-
-def _parse_model_spec(spec: str) -> tuple[str, str]:
-    """Split ``open_clip:<model>:<checkpoint>`` into its parts.
-
-    Raises:
-        GalleryError: If the spec is empty, malformed, or not an OpenCLIP model.
-    """
-    parts = str(spec).split(":")
-    if len(parts) != 3 or not all(parts):
-        raise GalleryError(
-            f"Gallery manifest has an unparseable embedding_model {spec!r}; "
-            f"expected '{_OPEN_CLIP_PREFIX}:<model>:<checkpoint>'"
-        )
-    framework, model_name, pretrained = parts
-    if framework != _OPEN_CLIP_PREFIX:
-        raise GalleryError(
-            f"Gallery was built with {framework!r}, but this predictor can only encode "
-            f"queries with OpenCLIP. Retrieval against a different embedding space would "
-            f"return meaningless matches."
-        )
-    return model_name, pretrained
-
 
 def load_gallery(gallery_path: str | Path) -> _LoadedGallery:
     """Load (and cache) a gallery version directory's index and metadata.
@@ -289,47 +268,6 @@ def load_gallery(gallery_path: str | Path) -> _LoadedGallery:
             info.version, info.image_count, info.dimension, info.model_spec,
         )
         return loaded
-
-
-def _load_model(model_name: str, pretrained: str, device: str) -> tuple[Any, Any]:
-    """Load (and cache) the OpenCLIP model and preprocessing transform."""
-    key = (model_name, pretrained, device)
-    cached = _model_cache.get(key)
-    if cached is not None:
-        return cached
-
-    with _model_lock:
-        cached = _model_cache.get(key)
-        if cached is not None:
-            return cached
-
-        try:
-            import open_clip
-        except ImportError as exc:  # pragma: no cover - depends on environment
-            raise GalleryError(
-                "Retrieval requires open-clip-torch (pip install open-clip-torch)"
-            ) from exc
-
-        logger.info("Loading OpenCLIP %s/%s on %s", model_name, pretrained, device)
-        model, _, preprocess = open_clip.create_model_and_transforms(
-            model_name, pretrained=pretrained, device=device
-        )
-        model.eval()
-        _model_cache[key] = (model, preprocess)
-        return model, preprocess
-
-
-def resolve_device(requested: str | None = None) -> str:
-    """Pick the torch device to run on."""
-    import torch
-
-    if requested and requested.lower() != "auto":
-        return requested
-    if torch.cuda.is_available():
-        return "cuda"
-    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
 
 
 class RetrievalGeolocator:
@@ -453,7 +391,7 @@ class RetrievalGeolocator:
         frames: Sequence[Any],
         top_k: int = DEFAULT_TOP_K,
         batch_size: int = DEFAULT_BATCH_SIZE,
-        progress: bool = False,
+        progress: Any = False,
     ) -> list[FramePrediction]:
         """Encode video frames in batches and retrieve for all of them at once.
 
@@ -465,7 +403,8 @@ class RetrievalGeolocator:
                 ``blur_score`` -- i.e. :class:`video_processor.Frame`.
             top_k: Neighbours to retain per frame.
             batch_size: Frames encoded per forward pass.
-            progress: Log progress after each encoded batch.
+            progress: ``True`` to log a line per encoded batch, or a
+                ``(done, total)`` callable to drive a progress bar or GUI.
 
         Returns:
             One :class:`FramePrediction` per frame, in input order.
@@ -477,10 +416,13 @@ class RetrievalGeolocator:
         for start in range(0, len(frames), batch_size):
             chunk = frames[start : start + batch_size]
             chunks.append(self.encode([frame.image for frame in chunk]))
-            if progress:
-                logger.info(
-                    "Encoded %d/%d frames", min(start + batch_size, len(frames)), len(frames)
-                )
+            _report_progress(
+                progress,
+                min(start + batch_size, len(frames)),
+                len(frames),
+                logger=logger,
+                message="Encoded %d/%d frames",
+            )
 
         vectors = np.vstack(chunks)
         retrieved = self.search(vectors, top_k=top_k)

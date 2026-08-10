@@ -93,23 +93,46 @@ def thin_by_spacing(frame: pd.DataFrame, min_spacing_m: float, seed: int = 1337)
     places). Applied to dense Mapillary data it converts a redundant batch into
     a location-diverse one. Rows are shuffled first so the retained set is not
     biased toward whichever tile happens to sort first.
+
+    Latitude-banded so the cost stays near-linear. The straightforward version
+    compared each candidate against every point kept so far and grew that array
+    with ``np.vstack``, which is quadratic in both distance computations and
+    memory copying: at 50,000 points it dominated a whole run's wall time, and
+    it does not reach the millions this pipeline is meant to scale to.
+
+    Banding is **exact, not approximate**. Bands are one threshold tall, so any
+    kept point within ``min_spacing_m`` of a candidate differs in latitude by at
+    most one band; checking the candidate's band and its two neighbours cannot
+    miss a conflict. ``tests/test_location_sampling.py`` asserts the retained
+    set is identical to the brute-force result.
     """
     shuffled = frame.sample(frac=1.0, random_state=seed).reset_index(drop=True)
     coords = shuffled[["lat", "lon"]].to_numpy(dtype=np.float64)
 
-    keep_idx: list[int] = []
-    kept_coords = np.empty((0, 2))
     threshold_km = min_spacing_m / 1000.0
+    # One degree of latitude is ~111.32 km everywhere, so a band of this height
+    # is exactly the threshold tall regardless of longitude convergence.
+    band_degrees = threshold_km / 111.32
 
-    for i, coord in enumerate(coords):
-        if len(kept_coords) == 0:
-            keep_idx.append(i)
-            kept_coords = coord[None, :]
-            continue
-        d = haversine_km(coord[0], coord[1], kept_coords[:, 0], kept_coords[:, 1])
-        if d.min() >= threshold_km:
-            keep_idx.append(i)
-            kept_coords = np.vstack([kept_coords, coord])
+    keep_idx: list[int] = []
+    bands: dict[int, list[tuple[float, float]]] = {}
+
+    for i, (lat, lon) in enumerate(coords):
+        band = int(np.floor(lat / band_degrees))
+        neighbours: list[tuple[float, float]] = []
+        for offset in (-1, 0, 1):
+            found = bands.get(band + offset)
+            if found:
+                neighbours.extend(found)
+
+        if neighbours:
+            near = np.asarray(neighbours)
+            distances = haversine_km(lat, lon, near[:, 0], near[:, 1])
+            if distances.min() < threshold_km:
+                continue
+
+        keep_idx.append(i)
+        bands.setdefault(band, []).append((lat, lon))
 
     return shuffled.iloc[keep_idx].reset_index(drop=True)
 

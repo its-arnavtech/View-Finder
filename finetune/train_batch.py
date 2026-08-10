@@ -83,6 +83,9 @@ def train_one_batch(
     eval_every_epochs: int = 0,
     early_stop_patience: int = 0,
     select_metric: str = "median_error_km",
+    selectors: "list | None" = None,
+    step_eval_every: int = 0,
+    step_eval_until: int = 0,
 ) -> tuple[list[dict], list[dict], dict]:
     """Run the contrastive training loop over one batch of data.
 
@@ -92,11 +95,33 @@ def train_one_batch(
     converging rather than merely running.
 
     Training loss on this data keeps falling long after held-out error starts
-    regressing, so the final weights are not the best weights. `select_metric`
-    (lower is better) is tracked across evaluations, the best state is saved
-    separately as location_encoder_best.pth, and `early_stop_patience`
-    consecutive non-improving evaluations end the run.
+    regressing, so the final weights are not the best weights.
+
+    Selection is plural. `selectors` is a list of
+    :class:`checkpoint_selection.CheckpointSelector`, each tracking one metric
+    into its own checkpoint file; the one with `drives_early_stop` set governs
+    `early_stop_patience`. Passing None keeps the original single-metric
+    behaviour on `select_metric`, writing location_encoder_best.pth, so callers
+    that predate multi-metric selection are unaffected.
+
+    The returned `best` dict describes the early-stop-driving selector, which
+    keeps the old three-tuple contract intact; every selector's own state is on
+    the objects the caller passed in.
+
+    `step_eval_every` additionally evaluates mid-epoch, every N optimizer steps,
+    for the first `step_eval_until` steps (0 = the whole run). Epoch-granularity
+    probing is too coarse early on: in the commons01 run essentially all of the
+    external gain arrived inside the first epoch's 107 steps and was already
+    decaying by the second, so a per-epoch probe cannot locate the optimum or
+    even confirm it is inside epoch 0. These dense points feed the selectors
+    like any other, so a step-50 checkpoint can win.
     """
+    from checkpoint_selection import legacy_selector
+
+    owns_selectors = selectors is None
+    if owns_selectors:
+        selectors = [legacy_selector(select_metric)]
+    driver = next((s for s in selectors if s.drives_early_stop), selectors[0])
     dataset = GeoTrainDataset(frame)
     loader = DataLoader(
         dataset,
@@ -125,8 +150,6 @@ def train_one_batch(
     os.makedirs(ckpt_dir, exist_ok=True)
     history: list[dict] = []
     trajectory: list[dict] = []
-    best = {"value": float("inf"), "epoch": None, "step": None, "path": None, "metrics": None}
-    stale_evals = 0
     global_step = 0
     log_file = open(log_path, "a", encoding="utf-8")
 
@@ -195,6 +218,53 @@ def train_one_batch(
                 print(f"{record['step']:>6} {record['epoch']:>6} {record['loss']:>10.5f} "
                       f"{record['lr']:>10.2e} {record['peak_reserved_gb']:>9.3f} {record['sec']:>7.3f}")
 
+            # Dense mid-epoch probing. Selectors see these exactly like an
+            # epoch-boundary evaluation, so an early-step checkpoint can win.
+            if (
+                eval_hook
+                and step_eval_every
+                and global_step % step_eval_every == 0
+                and (not step_eval_until or global_step <= step_eval_until)
+            ):
+                step_metrics = eval_hook(epoch, global_step)
+                running_loss = float(np.mean(epoch_losses))
+                trajectory.append({
+                    "epoch": epoch,
+                    "step": global_step,
+                    "mean_loss": running_loss,
+                    "mid_epoch": True,
+                    **step_metrics,
+                })
+
+                def save_step(filename: str, _step=global_step, _loss=running_loss) -> str:
+                    path = os.path.join(ckpt_dir, filename)
+                    torch.save(
+                        {
+                            "location_encoder": model.location_encoder.state_dict(),
+                            "step": _step,
+                            "epoch": epoch,
+                            "loss": _loss,
+                            "saved_at": datetime.now(timezone.utc).isoformat(),
+                            "note": "location encoder only; image encoder and "
+                                    "logit_scale are unchanged pretrained weights",
+                        },
+                        path,
+                    )
+                    return path
+
+                improved_now = [
+                    s.name for s in selectors
+                    if s.offer(step_metrics, epoch=epoch, step=global_step, save=save_step)
+                ]
+                # Keep a scoreable artifact at every dense probe so the run can
+                # be re-scored later without retraining.
+                save_checkpoint(model, ckpt_dir, global_step, running_loss, tag="probe")
+                if improved_now:
+                    print(f"    step {global_step}: new best[{','.join(improved_now)}]")
+
+                model.train()
+                model.image_encoder.eval()
+
         line = f"  epoch {epoch:>3} mean loss: {np.mean(epoch_losses):.5f}"
 
         # Checkpoint at the end of every epoch. A fixed step interval silently
@@ -211,25 +281,54 @@ def train_one_batch(
             line += (f"  | held-out median {metrics['median_error_km']:.1f} km"
                      f"  acc@25km {metrics['acc_25km']:.4f}")
 
-            current = metrics[select_metric]
-            if current < best["value"]:
-                best.update(
-                    value=float(current),
-                    epoch=epoch,
-                    step=global_step,
-                    metrics=metrics,
-                    path=save_checkpoint(model, ckpt_dir, global_step, float(np.mean(epoch_losses)), tag="best"),
+            mean_loss = float(np.mean(epoch_losses))
+
+            def save_as(filename: str) -> str:
+                """Persist the current state under an explicit filename."""
+                path = os.path.join(ckpt_dir, filename)
+                torch.save(
+                    {
+                        "location_encoder": model.location_encoder.state_dict(),
+                        "step": global_step,
+                        "epoch": epoch,
+                        "loss": mean_loss,
+                        "saved_at": datetime.now(timezone.utc).isoformat(),
+                        "note": "location encoder only; image encoder and logit_scale "
+                                "are unchanged pretrained weights",
+                    },
+                    path,
                 )
-                stale_evals = 0
-                line += "  <- best"
-            else:
-                stale_evals += 1
-                if early_stop_patience and stale_evals >= early_stop_patience:
-                    line += f"  | early stop ({stale_evals} evals without improvement)"
-                    stop_now = True
+                return path
+
+            improved = []
+            for selector in selectors:
+                # Legacy single-selector callers keep the historical filename.
+                if owns_selectors:
+                    target = lambda _name: save_checkpoint(  # noqa: E731
+                        model, ckpt_dir, global_step, mean_loss, tag="best"
+                    )
+                else:
+                    target = save_as
+                if selector.offer(metrics, epoch=epoch, step=global_step, save=target):
+                    improved.append(selector.name)
+
+            if improved:
+                line += f"  <- best[{','.join(improved)}]"
 
             model.train()
             model.image_encoder.eval()
+
+        # Close the epoch on every selector, then judge patience in EPOCHS.
+        # Done outside the eval block so the clock stays honest for an epoch
+        # that produced no evaluation at all. Patience is spent only by the
+        # driving selector; another metric improving is not evidence that the
+        # one being optimised did.
+        for selector in selectors:
+            selector.end_epoch()
+        if early_stop_patience and driver.stale_epochs >= early_stop_patience:
+            line += (f"  | early stop ({driver.stale_epochs} epoch(s) without "
+                     f"improvement on {driver.name})")
+            stop_now = True
 
         print(line)
         if stop_now:
@@ -237,6 +336,18 @@ def train_one_batch(
 
     log_file.close()
     print(f"\ntraining wall time: {time.perf_counter() - started:.1f}s")
+
+    # The three-tuple contract is unchanged: `best` describes the selector that
+    # governed early stopping. Callers using multiple selectors read the rest
+    # off the objects they passed in.
+    best = {
+        "value": driver.value,
+        "epoch": driver.epoch,
+        "step": driver.step,
+        "path": driver.path,
+        "metrics": driver.metrics,
+        "selector": driver.name,
+    }
     return history, trajectory, best
 
 
