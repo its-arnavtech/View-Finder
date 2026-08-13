@@ -59,6 +59,16 @@ a coordinate present in its GPS gallery — the bundled gallery holds ~100k poin
 spread worldwide, so a remote area may have no nearby entry and the prediction
 gets snapped to the closest one that exists.
 
+View Finder loads the fine-tuned OSV-5M location encoder at
+`finetune/checkpoints/osv5m_reg_narrow_30/location_encoder_best_external.pth`
+by default. The CLIP vision tower and the rest of GeoCLIP remain stock. Use
+`--use-stock-geoclip` for an explicit stock-encoder comparison. The default
+fails clearly if the fine-tuned checkpoint is missing instead of silently
+changing models. Checkpoints are local training artifacts and remain gitignored,
+so a fresh clone must copy this winning checkpoint into that exact path (or set
+`VIEWFINDER_LOCATION_ENCODER` to its location) before using the fine-tuned
+default.
+
 ### `plonk-osv`, `plonk-yfcc`, and `trusted`
 
 The optional PLONK predictors sample a probability distribution over the
@@ -553,6 +563,128 @@ Supported formats depend on the installed Pillow/OpenCV decoders. Run
 `view-finder formats` for the exact image and video
 extensions available in the current environment. Format detection is
 extension-based and case-insensitive.
+
+## Discord bot
+
+`viewfinder/discord_bot.py` is a standalone, always-on Discord process. It is
+not imported by, merged with, or dependent on the News bot. Use a **new Discord
+application and token** so the two bots retain separate identities.
+
+1. Open [Discord Developer Portal](https://discord.com/developers/applications),
+   choose **New Application**, give it a View Finder-specific name, and add a bot
+   on the **Bot** page.
+2. On that Bot page, enable **Message Content Intent**. Attachments can arrive
+   without it, but URL text cannot.
+3. Reset/copy the bot token. Copy `.env.example` to `.env`, then set
+   `DISCORD_BOT_TOKEN=...` there. `.env` is gitignored; the token is a password
+   and must never be committed or pasted into logs.
+4. Under **OAuth2 -> URL Generator**, select the `bot` scope and grant **View
+   Channels**, **Send Messages**, and **Read Message History**. Open the generated
+   URL to invite this new bot to a server. Sharing a server also lets you DM it
+   when your Discord privacy settings permit DMs from server members.
+5. Install and run it from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r viewfinder\requirements-discord.txt
+.\.venv\Scripts\python.exe -m viewfinder.discord_bot
+```
+
+Keep that process running for the bot to respond. In either a DM or an accessible
+channel, send an image/video attachment or a recognized media URL. The bot first
+replies that it is processing, queues concurrent requests to stay within GPU
+memory, then edits the reply with the location, coordinates, confidence, and top
+alternatives. Link downloads use `yt-dlp`, are capped at 200 MB and 10 minutes by
+default, and report private/login-gated/rate-limited Instagram failures plainly.
+The limits can be changed with the variables documented in `.env.example`.
+
+## Discord bot
+
+A standalone bot that geolocates any image or video you send it. Send a photo
+as an attachment, or paste a link, in a DM or in any channel the bot can see;
+it replies with the place name, coordinates, a map link, confidence, and the
+top alternatives.
+
+It is a **separate process with its own bot identity**. If you already run
+another bot, this one needs its own application and its own token — two
+processes cannot share a token, and Discord will disconnect both if they try.
+
+### 1. Create the application
+
+1. Go to <https://discord.com/developers/applications> and click
+   **New Application**. Name it whatever you like (e.g. `View Finder`).
+2. Open the **Bot** tab and click **Add Bot**.
+3. Under **Privileged Gateway Intents**, enable **Message Content Intent**.
+   This is required: without it the bot still sees attachments, but reads every
+   message body as empty, so pasted links silently stop working.
+4. Click **Reset Token**, then **Copy**. This is the only time it is shown.
+
+### 2. Put the token in `.env`
+
+```bash
+cp .env.example .env
+```
+
+Then set the token in `.env`:
+
+```
+DISCORD_BOT_TOKEN=your-token-here
+```
+
+`.env` is gitignored. Never commit a real token — anyone holding it can act as
+your bot. The bot never prints or logs it, including in error messages.
+
+### 3. Invite it
+
+In the developer portal, open **OAuth2 → URL Generator**:
+
+- **Scopes:** `bot`
+- **Bot Permissions:** `Send Messages`, `Read Message History`,
+  `Attach Files`, and `View Channel`
+
+Open the generated URL and pick a server. For DMs, you and the bot only need to
+share one server — you do not need to invite it to a channel specifically.
+
+### 4. Install and run
+
+```bash
+python -m pip install -r viewfinder/requirements-discord.txt
+python viewfinder/discord_bot.py
+```
+
+**It only responds while it is running.** There is no hosted component; close
+the terminal and the bot goes offline. Keep it in its own terminal, or register
+it as a background service.
+
+### What it does and does not handle
+
+| input | behaviour |
+|---|---|
+| Image or video attachment | Downloaded and predicted |
+| Instagram / TikTok / YouTube / Twitter / Reddit / Vimeo link | Fetched with yt-dlp, then predicted |
+| Direct link ending in a media extension | Fetched and predicted |
+| Any other link, or plain text | Ignored, so the bot stays quiet in a busy channel |
+| Message from another bot | Ignored, so two bots cannot talk to each other forever |
+
+Safeguards: attachments are capped at 50 MB and link downloads at 200 MB and
+600 seconds (all configurable in `.env`), a "working on it" reply goes out
+immediately since inference takes real time, and predictions are serialised —
+one GeoCLIP instance nearly fills the GPU, so simultaneous messages queue
+rather than loading a second copy.
+
+**Instagram links fail unpredictably**, and not because of anything you did:
+Instagram blocks anonymous downloads, rate-limits, and periodically breaks
+yt-dlp's extractor. The bot says so plainly and suggests downloading the video
+and attaching it directly, which always works. It never replies with a stack
+trace or goes silent.
+
+### Relationship to the news bot
+
+This mirrors the conventions of the separate news bot — `DISCORD_BOT_TOKEN`
+loaded from `.env` via python-dotenv, a token that is never logged — but shares
+no code and no identity with it. One difference: the news bot calls Discord's
+REST API directly and polls, because it only ever pushes a digest on a
+schedule. This bot has to react to arbitrary incoming messages, so it uses
+discord.py's gateway client instead.
 
 ## Pipeline
 

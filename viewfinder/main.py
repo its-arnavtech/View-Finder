@@ -253,6 +253,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="print every accepted image and video extension, then exit",
     )
     parser.add_argument(
+        "--use-stock-geoclip",
+        action="store_true",
+        help=(
+            "use GeoCLIP's original location encoder instead of the bundled "
+            "fine-tuned one. The fine-tuned encoder scores 953 km median error on "
+            "the independent benchmark against stock's 1331 km, so this is for "
+            "comparison and debugging rather than normal use"
+        ),
+    )
+    parser.add_argument(
         "--crop-screen",
         choices=("auto", "off"),
         default="auto",
@@ -415,15 +425,18 @@ def _stage(name: str, operation: Callable[[], _T], *, hint: str = "") -> _T:
     return value
 
 
-def _new_geolocator() -> Any:
+def _new_geolocator(use_stock_geoclip: bool = False) -> Any:
     """Construct GeoCLIP in enforced offline mode.
 
     Any custom gallery selection is read from the environment, which the CLI
     flags populate in :func:`run`. This keeps the construction signature stable
     for both the image and video pipelines.
+
+    By default this loads the fine-tuned location encoder; ``use_stock_geoclip``
+    keeps GeoCLIP's original weights for comparison.
     """
     geolocator_class = _import_attr("geolocator", "GeoLocator")
-    return geolocator_class(offline=True)
+    return geolocator_class(offline=True, use_stock_geoclip=use_stock_geoclip)
 
 
 def _new_plonk_geolocator(
@@ -525,7 +538,7 @@ def _predictor_specs(args: argparse.Namespace) -> list[PredictorSpec]:
     geoclip = PredictorSpec(
         key="geoclip",
         label="GeoCLIP",
-        build=_new_geolocator,
+        build=lambda: _new_geolocator(use_stock_geoclip=args.use_stock_geoclip),
         load_hint=(
             "Install the requirements and pre-cache the GeoCLIP weights; "
             "the CLI does not access the network."

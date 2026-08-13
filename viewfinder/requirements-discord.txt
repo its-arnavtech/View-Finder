@@ -1,0 +1,11 @@
+# View Finder Discord bot. Install on top of viewfinder/requirements.txt:
+#   python -m pip install -r viewfinder/requirements-discord.txt
+#
+# The bot is a separate process from the CLI and needs the CLI's dependencies
+# too, since it runs the same prediction pipeline in-process.
+discord.py>=2.3.0
+python-dotenv>=1.0.1
+
+# Link downloads. Also listed in requirements-social-video.txt; repeated here
+# so the bot can be installed without the social-video CLI extras.
+yt-dlp>=2024.1.1

@@ -65,9 +65,11 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime
 
 import numpy as np
+import pandas as pd
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -117,6 +119,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--reg-strength", type=float, default=0.0,
+        help="L2-SP strength: penalize squared drift from this run's initialized "
+             "location-encoder weights (0 disables; moderate experimental value: 1e-3)",
+    )
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--eval-batch-size", type=int, default=64)
     parser.add_argument("--eval-every-epochs", type=int, default=1)
@@ -133,6 +140,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "inside the first epoch's 107 steps. 0 disables")
     parser.add_argument("--step-eval-until", type=int, default=0,
                         help="stop dense step probing after this many steps (0 = whole run)")
+    parser.add_argument(
+        "--step-eval-early-every", type=int, default=0,
+        help="override the normal step-probe cadence through "
+             "--step-eval-early-until (0 disables)",
+    )
+    parser.add_argument(
+        "--step-eval-early-until", type=int, default=0,
+        help="last step governed by --step-eval-early-every",
+    )
     parser.add_argument("--checkpoint-select-metric",
                         choices=("indist", "external", "both"),
                         default="external",
@@ -148,6 +164,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "GeoCLIP, to accumulate across shards. Baselines are still "
                              "measured on pretrained weights first, so the reported "
                              "deltas stay comparable with every unchained run")
+    parser.add_argument(
+        "--reuse-cached-run",
+        default=None,
+        metavar="DIR",
+        help="reuse split_train.csv, split_val.csv, and their validated embedding "
+             "memmap from a completed run directory; skips ingestion, thinning, "
+             "splitting, downloading, and image encoding",
+    )
     parser.add_argument("--discard-after", action="store_true",
                         help="delete this batch's raw images once the checkpoint is written")
     parser.add_argument("--no-amp", action="store_true")
@@ -170,6 +194,7 @@ def _adapter_kwargs(pairs: list[str]) -> dict:
 
 
 def main() -> None:
+    run_started = time.perf_counter()
     args = build_arg_parser().parse_args()
 
     if args.queue_size % args.batch_size != 0:
@@ -200,34 +225,156 @@ def main() -> None:
         raise SystemExit(f"\nREFUSING TO INGEST: {availability.blocked_reason()}")
     print()
 
-    # ---- 2. Ingest ----
-    frame = adapter.load(limit=args.limit, seed=args.seed)
+    # ---- 2. Ingest (or resume an already validated cached pool) ----
+    reused_cached_pool = bool(args.reuse_cached_run)
+    if reused_cached_pool:
+        source_dir = os.path.abspath(args.reuse_cached_run)
+        source_summary_path = os.path.join(source_dir, "summary.json")
+        source_train_path = os.path.join(source_dir, "split_train.csv")
+        source_val_path = os.path.join(source_dir, "split_val.csv")
+        missing = [
+            path for path in (source_summary_path, source_train_path, source_val_path)
+            if not os.path.isfile(path)
+        ]
+        if missing:
+            raise SystemExit(
+                "--reuse-cached-run is incomplete; missing: " + ", ".join(missing)
+            )
+        with open(source_summary_path, encoding="utf-8") as handle:
+            source_summary = json.load(handle)
+        train_frame = pd.read_csv(source_train_path)
+        val_frame = pd.read_csv(source_val_path)
+        required_cache_columns = {
+            "embedding_path", "embedding_index", "embedding_count", "embedding_dim",
+        }
+        for label, part in (("train", train_frame), ("val", val_frame)):
+            absent = sorted(required_cache_columns - set(part.columns))
+            if absent:
+                raise SystemExit(
+                    f"reused {label} split lacks cached-embedding columns: {absent}"
+                )
+        cache_paths = set(train_frame["embedding_path"].astype(str)) | set(
+            val_frame["embedding_path"].astype(str)
+        )
+        if len(cache_paths) != 1:
+            raise SystemExit(
+                f"reused pool must reference exactly one embedding memmap, got {cache_paths}"
+            )
+        cache_path = next(iter(cache_paths))
+        if not os.path.isfile(cache_path):
+            raise SystemExit(f"reused embedding memmap not found: {cache_path}")
+        counts = set(pd.concat([
+            train_frame["embedding_count"], val_frame["embedding_count"]
+        ]).astype(int))
+        dims = set(pd.concat([
+            train_frame["embedding_dim"], val_frame["embedding_dim"]
+        ]).astype(int))
+        if len(counts) != 1 or len(dims) != 1:
+            raise SystemExit(
+                f"reused cache metadata is inconsistent: counts={counts}, dims={dims}"
+            )
+        cache_count, cache_dim = next(iter(counts)), next(iter(dims))
+        expected_bytes = cache_count * cache_dim * np.dtype(np.float16).itemsize
+        actual_bytes = os.path.getsize(cache_path)
+        if actual_bytes != expected_bytes:
+            raise SystemExit(
+                f"reused cache size mismatch: expected {expected_bytes} bytes for "
+                f"{cache_count}x{cache_dim} float16, found {actual_bytes}"
+            )
+        all_indices = pd.concat([
+            train_frame["embedding_index"], val_frame["embedding_index"]
+        ]).astype(int)
+        if len(all_indices) != cache_count or all_indices.nunique() != cache_count or (
+            all_indices.min() != 0 or all_indices.max() != cache_count - 1
+        ):
+            raise SystemExit(
+                "reused cache indices must cover every memmap row exactly once"
+            )
+
+        thinned = pd.concat([train_frame, val_frame], ignore_index=True)
+        frame = thinned
+        adapter_stats = dict(source_summary.get("adapter_stats") or {})
+        cache_stats = dict(adapter_stats.get("embedding_cache") or {})
+        cache_stats.update({
+            "path": cache_path,
+            "shape": [cache_count, cache_dim],
+            "bytes": actual_bytes,
+            "gib": actual_bytes / 1024 ** 3,
+            "reused_from": source_dir,
+            "reused": True,
+            "original_wall_seconds": cache_stats.get("wall_seconds"),
+            "wall_seconds": 0.0,
+        })
+        adapter_stats["embedding_cache"] = cache_stats
+        adapter_stats["cache_reused_from"] = source_dir
+        images_ingested = int(source_summary.get("images_ingested", len(thinned)))
+        retention = float(source_summary.get(
+            "location_retention",
+            len(thinned) / images_ingested if images_ingested else 0.0,
+        ))
+        pre_thinned = True
+        before = None
+        after = None
+        print(
+            f"reused cached pool: {source_dir}\n"
+            f"  split: train={len(train_frame)} val={len(val_frame)}\n"
+            f"  cache: {cache_count}x{cache_dim} float16, "
+            f"{actual_bytes / 1024 ** 3:.3f} GiB (build skipped)\n"
+        )
+    else:
+        pre_thinned = hasattr(adapter, "load_thinned")
+    if not reused_cached_pool and pre_thinned:
+        # Combined OSV-5M ingestion must decide the globally retained IDs before
+        # materializing images, so the adapter performs the same exact banded
+        # thinning across its complete metadata pool.
+        thinned = adapter.load_thinned(
+            min_spacing_m=args.min_spacing_m, seed=args.seed, limit=args.limit
+        )
+        adapter_stats = getattr(adapter, "stats", {})
+        images_ingested = int(adapter_stats.get("images_ingested", len(thinned)))
+        retention = float(adapter_stats.get(
+            "retention", len(thinned) / images_ingested if images_ingested else 0.0
+        ))
+        frame = thinned
+    elif not reused_cached_pool:
+        frame = adapter.load(limit=args.limit, seed=args.seed)
+        adapter_stats = {}
+        images_ingested = int(len(frame))
     filtered = getattr(adapter, "licence_filtered_out", None)
     if filtered:
         print(f"licence filter removed {filtered} rows before ingest")
-    print(f"ingested: {len(frame)} images from {args.dataset}\n")
+    print(f"ingested: {images_ingested} images from {args.dataset}\n")
     if frame.empty:
         raise SystemExit("Adapter returned no usable rows.")
 
-    before = measure_redundancy(frame)
-    print(before.format(f"{args.dataset}, unthinned"))
-    print()
+    if pre_thinned:
+        before = None
+        after = None
+        print(
+            f"adapter completed exact combined thinning to >={args.min_spacing_m:.0f} m: "
+            f"{images_ingested} -> {len(thinned)} ({retention:.1%} retained)\n"
+        )
+    else:
+        before = measure_redundancy(frame)
+        print(before.format(f"{args.dataset}, unthinned"))
+        print()
 
-    # ---- 3. Thin to real location diversity ----
-    thinned = thin_by_spacing(frame, min_spacing_m=args.min_spacing_m, seed=args.seed)
-    retention = len(thinned) / len(frame) if len(frame) else 0.0
-    print(f"thinning to >={args.min_spacing_m:.0f} m: {len(frame)} -> {len(thinned)} "
-          f"images ({retention:.1%} retained)\n")
-    after = measure_redundancy(thinned)
-    print(after.format(f"after >={args.min_spacing_m:.0f} m thinning"))
-    print()
+        # ---- 3. Thin to real location diversity ----
+        thinned = thin_by_spacing(frame, min_spacing_m=args.min_spacing_m, seed=args.seed)
+        retention = len(thinned) / len(frame) if len(frame) else 0.0
+        print(f"thinning to >={args.min_spacing_m:.0f} m: {len(frame)} -> {len(thinned)} "
+              f"images ({retention:.1%} retained)\n")
+        after = measure_redundancy(thinned)
+        print(after.format(f"after >={args.min_spacing_m:.0f} m thinning"))
+        print()
 
     if args.dry_run:
         print("--dry-run: stopping before training.")
         json.dump(
             {"dataset": args.dataset, "ingested": int(len(frame)),
              "locations": int(len(thinned)), "retention": retention,
-             "redundancy_before": vars(before), "redundancy_after": vars(after)},
+             "redundancy_before": vars(before) if before else None,
+             "redundancy_after": vars(after) if after else None},
             open(os.path.join(work_dir, "diversity.json"), "w", encoding="utf-8"), indent=2)
         return
 
@@ -236,13 +383,17 @@ def main() -> None:
     device = "cuda"
 
     # ---- 4. Leak-proof split, verified fail-closed ----
-    split = location_split(thinned, val_fraction=args.val_fraction,
-                           min_gap_m=args.min_spacing_m, seed=args.seed)
-    train_frame, val_frame = split["train"], split["val"]
+    if reused_cached_pool:
+        split = {"dropped_for_proximity": 0}
+    else:
+        split = location_split(thinned, val_fraction=args.val_fraction,
+                               min_gap_m=args.min_spacing_m, seed=args.seed)
+        train_frame, val_frame = split["train"], split["val"]
     check = verify_split_separation(train_frame, val_frame, min_gap_m=args.min_spacing_m)
     print(f"split: train={len(train_frame)} val={len(val_frame)} "
           f"(dropped {split['dropped_for_proximity']} training rows inside the buffer)")
-    print(f"separation verified: passed={check['passed']} | closest pair "
+    gap_label = "proven lower bound" if check.get("min_gap_m_is_lower_bound") else "closest pair"
+    print(f"separation verified: passed={check['passed']} | {gap_label} "
           f"{check['min_gap_m_observed']:.1f} m | violations {check['violations']}")
     if not check["passed"]:
         raise SystemExit("Split separation check failed -- refusing to train on a leaking split.")
@@ -262,11 +413,34 @@ def main() -> None:
     freeze_image_side(model)
     assert_freeze_contract(model)
     print(trainable_parameter_report(model))
+    amp = not args.no_amp
+
+    # Combined adapters can now materialize one shard at a time, cache the
+    # frozen vision features, and delete raw imagery before optimization. The
+    # split is already known, so training rows receive the training transform
+    # while held-out rows keep deterministic inference preprocessing.
+    if hasattr(adapter, "cache_embeddings") and not reused_cached_pool:
+        train_frame, val_frame = adapter.cache_embeddings(
+            train_frame,
+            val_frame,
+            model=model,
+            device=device,
+            batch_size=args.batch_size,
+            amp=amp,
+            num_workers=args.num_workers,
+        )
+        for name, part in (("train", train_frame), ("val", val_frame)):
+            part.to_csv(os.path.join(work_dir, f"split_{name}.csv"), index=False)
+        cache_stats = adapter.stats.get("embedding_cache", {})
+        print(
+            f"\nembedding cache: {cache_stats.get('gib', 0):.3f} GiB | "
+            f"{cache_stats.get('images_per_second', 0):.1f} images/s | "
+            f"raw:cache size ratio {cache_stats.get('raw_to_cache_size_ratio', 0):.1f}x"
+        )
 
     gps_gallery = load_gps_data(
         os.path.join(geoclip_file_dir, "gps_gallery", "coordinates_100K.csv")
     )
-    amp = not args.no_amp
 
     # ---- 6. Baselines: in-distribution and independent ----
     print("\nencoding held-out images (frozen image side, once)...")
@@ -336,6 +510,13 @@ def main() -> None:
                   f"{start_external['acc_200km']:.4f}")
             print("  training must beat THIS to show accumulation, not merely beat pretrained.")
 
+    # L2-SP must anchor to the weights training actually starts from. For a
+    # chained run this is deliberately after --init-checkpoint is loaded.
+    reg_reference = (
+        tb.capture_l2sp_reference(model.location_encoder)
+        if args.reg_strength else None
+    )
+
     # ---- 7. Train, probing the independent set on the way ----
     selectors = [
         CheckpointSelector(
@@ -361,8 +542,12 @@ def main() -> None:
         metrics = tb._clean(evaluate(model, val_features, val_coords, gps_gallery, device))
         # During dense step probing every evaluation carries an external
         # measurement; otherwise the configured epoch cadence applies.
-        dense = bool(args.step_eval_every) and (
-            not args.step_eval_until or step <= args.step_eval_until
+        dense = tb.should_step_evaluate(
+            step,
+            step_eval_every=args.step_eval_every,
+            step_eval_until=args.step_eval_until,
+            step_eval_early_every=args.step_eval_early_every,
+            step_eval_early_until=args.step_eval_early_until,
         )
         if probe is not None and (dense or (external_cadence > 0 and epoch % external_cadence == 0)):
             point = probe.probe(epoch=epoch, step=step, locations_trained=len(train_frame))
@@ -388,6 +573,10 @@ def main() -> None:
         selectors=selectors,
         step_eval_every=args.step_eval_every,
         step_eval_until=args.step_eval_until,
+        step_eval_early_every=args.step_eval_early_every,
+        step_eval_early_until=args.step_eval_early_until,
+        reg_strength=args.reg_strength,
+        reg_reference=reg_reference,
     )
     by_name = {selector.name: selector for selector in selectors}
     final_path = tb.save_checkpoint(model, ckpt_dir, history[-1]["step"],
@@ -460,11 +649,22 @@ def main() -> None:
         "dataset": args.dataset,
         "licence": availability.licence.value,
         "config": vars(args),
-        "images_ingested": int(len(frame)),
+        "images_ingested": images_ingested,
         "locations_after_thinning": int(len(thinned)),
         "location_retention": retention,
-        "redundancy_before_thinning": vars(before),
-        "redundancy_after_thinning": vars(after),
+        "redundancy_before_thinning": vars(before) if before else None,
+        "redundancy_after_thinning": vars(after) if after else None,
+        "adapter_stats": adapter_stats,
+        "country_distribution": {
+            str(country): int(count)
+            for country, count in thinned["region"].value_counts().items()
+        },
+        "regularization": {
+            "type": "l2_sp" if args.reg_strength else "none",
+            "strength": args.reg_strength,
+            "anchor": args.init_checkpoint or "pretrained_geoclip",
+            "standard_weight_decay": args.weight_decay,
+        },
         "train_locations": int(len(train_frame)),
         "val_locations": int(len(val_frame)),
         "separation_check": check,
@@ -485,6 +685,15 @@ def main() -> None:
         "final_checkpoint": final_path,
         "peak_reserved_gb": peak_gb,
         "raw_images_discarded": discarded,
+        "wall_clock": {
+            "total_seconds": time.perf_counter() - run_started,
+            "training_seconds": best.get("training_wall_seconds"),
+            "epoch_wall_times": best.get("epoch_wall_times", []),
+            "embedding_cache_seconds": (
+                adapter_stats.get("embedding_cache", {}).get("wall_seconds")
+                if adapter_stats else None
+            ),
+        },
     }
     with open(os.path.join(work_dir, "summary.json"), "w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, default=str)

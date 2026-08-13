@@ -21,7 +21,7 @@ from .base import (
 from .commons_landmarks import CommonsLandmarksAdapter
 from .mapillary_catalog import MapillaryCatalogAdapter
 from .msls import MSLSAdapter
-from .osv5m import OSV5MAdapter
+from .osv5m import OSV5MAdapter, OSV5MCombinedAdapter
 from .yfcc100m import YFCC100MAdapter
 
 ADAPTERS: dict[str, type[DatasetAdapter]] = {
@@ -29,6 +29,7 @@ ADAPTERS: dict[str, type[DatasetAdapter]] = {
     "mapillary-catalog": MapillaryCatalogAdapter,
     "msls": MSLSAdapter,
     "osv5m": OSV5MAdapter,
+    "osv5m-combined": OSV5MCombinedAdapter,
     "yfcc100m": YFCC100MAdapter,
 }
 
@@ -48,6 +49,7 @@ __all__ = [
     "LicenceStatus",
     "MSLSAdapter",
     "OSV5MAdapter",
+    "OSV5MCombinedAdapter",
     "MapillaryCatalogAdapter",
     "REQUIRED_COLUMNS",
     "YFCC100MAdapter",

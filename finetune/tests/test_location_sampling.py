@@ -18,7 +18,11 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from location_sampling import haversine_km, thin_by_spacing  # noqa: E402
+from location_sampling import (  # noqa: E402
+    _banded_proximity_mask,
+    haversine_km,
+    thin_by_spacing,
+)
 
 
 def brute_force_thin(frame: pd.DataFrame, min_spacing_m: float, seed: int = 1337):
@@ -143,3 +147,21 @@ def test_banded_is_substantially_faster_at_scale():
     assert fast_seconds < slow_seconds, (
         f"banded {fast_seconds:.2f}s vs brute force {slow_seconds:.2f}s"
     )
+
+
+def test_banded_split_proximity_matches_pairwise_exactly():
+    rng = np.random.default_rng(77)
+    reference = rng.uniform([-80, -180], [80, 180], size=(500, 2))
+    query = rng.uniform([-80, -180], [80, 180], size=(300, 2))
+    # Inject threshold violations, including across the antimeridian.
+    query[:3] = reference[:3] + np.array([0.0001, 0.0001])
+    reference[3] = [10.0, 179.9999]
+    query[3] = [10.0, -179.9999]
+
+    fast, _ = _banded_proximity_mask(query, reference, min_gap_m=100.0)
+    distances = haversine_km(
+        query[:, 0][:, None], query[:, 1][:, None],
+        reference[:, 0][None, :], reference[:, 1][None, :],
+    )
+    slow = distances.min(axis=1) < 0.100
+    assert fast.tolist() == slow.tolist()
