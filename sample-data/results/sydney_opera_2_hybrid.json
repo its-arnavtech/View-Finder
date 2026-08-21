@@ -1,0 +1,86 @@
+{
+  "input": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/sydney_opera_2.jpg",
+  "input_type": "image",
+  "source": {
+    "kind": "local_file",
+    "path": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/sydney_opera_2.jpg"
+  },
+  "prediction": {
+    "latitude": -33.8568,
+    "longitude": 151.2153,
+    "country": "AU",
+    "admin1": "New South Wales",
+    "city": "Kirribilli",
+    "evidence_tier": "embedded_gps_metadata",
+    "evidence_source": "exif_gps",
+    "automation_accepted": true
+  },
+  "predictions": [
+    {
+      "rank": 1,
+      "lat": -33.8568,
+      "lon": 151.2153,
+      "confidence": 74.3,
+      "support_count": 1,
+      "candidate_count": 1,
+      "top_similarity": 1.0,
+      "country": "AU",
+      "admin1": "New South Wales",
+      "city": "Kirribilli",
+      "confidence_details": {
+        "confidence_percent": 74.3,
+        "signals": {
+          "similarity_strength_and_consistency": 1.0,
+          "geographic_agreement": 0.5,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    }
+  ],
+  "alternatives": [],
+  "predictor": "hybrid",
+  "processing": {
+    "candidates_returned": 1,
+    "clusters_returned": 1
+  },
+  "model": {
+    "system": "fully-local-evidence-hybrid",
+    "data_root": "/Users/pomoika/Documents/GitHub_repo/View-Finder/local-data",
+    "visual_prior": "PLONK OSV-5M (GeoCLIP if PLONK is unavailable)",
+    "network_at_runtime": false,
+    "evidence_order": [
+      "embedded_exif_gps",
+      "near_exact_commons_perceptual_match",
+      "paddleocr_geonames_plus_commons_landmark",
+      "single_channel_review",
+      "plonk_prior_abstain"
+    ]
+  },
+  "evidence_assessment": {
+    "decision": "emit",
+    "reliability_tier": "embedded_gps_metadata",
+    "reason": "The file contains valid embedded GPS. It is direct metadata but is editable and not cryptographically authenticated.",
+    "automation_accepted": true,
+    "state_country_accepted": true,
+    "evidence_agreement_radius_km": null,
+    "selected_source": "exif_gps",
+    "exif_gps": {
+      "latitude": -33.8568,
+      "longitude": 151.2153
+    },
+    "ocr_lines": [],
+    "place_matches": [],
+    "perceptual_matches": [],
+    "landmark_matches": [],
+    "provider_status": {},
+    "prior_agreement_km": null,
+    "warning": "Local evidence can support or reject a result, but it cannot make arbitrary image geolocation infallible. PLONK is reported only as a prior and never authorizes a prediction by itself."
+  },
+  "warning": "Local evidence can support or reject a result, but it cannot make arbitrary image geolocation infallible. PLONK is reported only as a prior and never authorizes a prediction by itself."
+}

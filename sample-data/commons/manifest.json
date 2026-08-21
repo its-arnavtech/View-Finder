@@ -1,0 +1,162 @@
+[
+  {
+    "file": "sample-data/commons/eiffel_paris_1.jpg",
+    "label": "eiffel_paris",
+    "true_lat": 48.8584,
+    "true_lon": 2.2945,
+    "source": "wikimedia_commons",
+    "title": "File:Eiffel Tower 5 (bird eye view) - panoramio.jpg",
+    "license": "CC BY 3.0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/3/31/Eiffel_Tower_5_%28bird_eye_view%29_-_panoramio.jpg"
+  },
+  {
+    "file": "sample-data/commons/eiffel_paris_2.jpg",
+    "label": "eiffel_paris",
+    "true_lat": 48.8584,
+    "true_lon": 2.2945,
+    "source": "wikimedia_commons",
+    "title": "File:Eiffel Tower 7 (bird eye view) - panoramio.jpg",
+    "license": "CC BY 3.0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/b/bb/Eiffel_Tower_7_%28bird_eye_view%29_-_panoramio.jpg"
+  },
+  {
+    "file": "sample-data/commons/golden_gate_sf_1.jpg",
+    "label": "golden_gate_sf",
+    "true_lat": 37.8199,
+    "true_lon": -122.4783,
+    "source": "wikimedia_commons",
+    "title": "File:San Fran In A New Light (Unsplash).jpg",
+    "license": "CC0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c4/San_Fran_In_A_New_Light_%28Unsplash%29.jpg/960px-San_Fran_In_A_New_Light_%28Unsplash%29.jpg"
+  },
+  {
+    "file": "sample-data/commons/golden_gate_sf_2.jpg",
+    "label": "golden_gate_sf",
+    "true_lat": 37.8199,
+    "true_lon": -122.4783,
+    "source": "wikimedia_commons",
+    "title": "File:Another One (Unsplash).jpg",
+    "license": "CC0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d2/Another_One_%28Unsplash%29.jpg/960px-Another_One_%28Unsplash%29.jpg"
+  },
+  {
+    "file": "sample-data/commons/mount_rainier_1.jpg",
+    "label": "mount_rainier",
+    "true_lat": 46.8523,
+    "true_lon": -121.7603,
+    "source": "wikimedia_commons",
+    "title": "File:The trail to ranier.jpg",
+    "license": "CC BY-SA 4.0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/8e/The_trail_to_ranier.jpg/960px-The_trail_to_ranier.jpg"
+  },
+  {
+    "file": "sample-data/commons/mount_rainier_2.jpg",
+    "label": "mount_rainier",
+    "true_lat": 46.8523,
+    "true_lon": -121.7603,
+    "source": "wikimedia_commons",
+    "title": "File:Small tree-lined lake (Unsplash).jpg",
+    "license": "CC0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/14/Small_tree-lined_lake_%28Unsplash%29.jpg/960px-Small_tree-lined_lake_%28Unsplash%29.jpg"
+  },
+  {
+    "file": "sample-data/commons/colosseum_rome_1.jpg",
+    "label": "colosseum_rome",
+    "true_lat": 41.8902,
+    "true_lon": 12.4922,
+    "source": "wikimedia_commons",
+    "title": "File:20160425 133 Roma - Colosseum (26633238122).jpg",
+    "license": "CC BY 2.0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/ed/20160425_133_Roma_-_Colosseum_%2826633238122%29.jpg/960px-20160425_133_Roma_-_Colosseum_%2826633238122%29.jpg"
+  },
+  {
+    "file": "sample-data/commons/colosseum_rome_2.jpg",
+    "label": "colosseum_rome",
+    "true_lat": 41.8902,
+    "true_lon": 12.4922,
+    "source": "wikimedia_commons",
+    "title": "File:20160425 125 Roma - Colosseum (26120178914).jpg",
+    "license": "CC BY 2.0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/44/20160425_125_Roma_-_Colosseum_%2826120178914%29.jpg/960px-20160425_125_Roma_-_Colosseum_%2826120178914%29.jpg"
+  },
+  {
+    "file": "sample-data/commons/tokyo_tower_1.jpg",
+    "label": "tokyo_tower",
+    "true_lat": 35.6586,
+    "true_lon": 139.7454,
+    "source": "wikimedia_commons",
+    "title": "File:View (7144162661).jpg",
+    "license": "CC BY-SA 2.0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/00/View_%287144162661%29.jpg/960px-View_%287144162661%29.jpg"
+  },
+  {
+    "file": "sample-data/commons/tokyo_tower_2.jpg",
+    "label": "tokyo_tower",
+    "true_lat": 35.6586,
+    "true_lon": 139.7454,
+    "source": "wikimedia_commons",
+    "title": "File:Detail of Tokyo Tower 2011 (5649480567).jpg",
+    "license": "CC BY 2.0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b2/Detail_of_Tokyo_Tower_2011_%285649480567%29.jpg/960px-Detail_of_Tokyo_Tower_2011_%285649480567%29.jpg"
+  },
+  {
+    "file": "sample-data/commons/statue_liberty_nyc_1.jpg",
+    "label": "statue_liberty_nyc",
+    "true_lat": 40.6892,
+    "true_lon": -74.0445,
+    "source": "wikimedia_commons",
+    "title": "File:New York City Skyline - panoramio.jpg",
+    "license": "CC BY-SA 3.0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0d/New_York_City_Skyline_-_panoramio.jpg/960px-New_York_City_Skyline_-_panoramio.jpg"
+  },
+  {
+    "file": "sample-data/commons/statue_liberty_nyc_2.jpg",
+    "label": "statue_liberty_nyc",
+    "true_lat": 40.6892,
+    "true_lon": -74.0445,
+    "source": "wikimedia_commons",
+    "title": "File:8-7-16-Statue-of-Liberty-XT2-6100-copy-small.jpg",
+    "license": "CC BY-SA 4.0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f1/8-7-16-Statue-of-Liberty-XT2-6100-copy-small.jpg/960px-8-7-16-Statue-of-Liberty-XT2-6100-copy-small.jpg"
+  },
+  {
+    "file": "sample-data/commons/sydney_opera_1.jpg",
+    "label": "sydney_opera",
+    "true_lat": -33.8568,
+    "true_lon": 151.2153,
+    "source": "wikimedia_commons",
+    "title": "File:Sydney Opera House, Sydney, Australia (Unsplash fLEw4UdS0D0).jpg",
+    "license": "CC0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/92/Sydney_Opera_House%2C_Sydney%2C_Australia_%28Unsplash_fLEw4UdS0D0%29.jpg/960px-Sydney_Opera_House%2C_Sydney%2C_Australia_%28Unsplash_fLEw4UdS0D0%29.jpg"
+  },
+  {
+    "file": "sample-data/commons/sydney_opera_2.jpg",
+    "label": "sydney_opera",
+    "true_lat": -33.8568,
+    "true_lon": 151.2153,
+    "source": "wikimedia_commons",
+    "title": "File:Sydney Opera House, Sydney, Australia (Unsplash tGz5VuJPOV8).jpg",
+    "license": "CC0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Sydney_Opera_House%2C_Sydney%2C_Australia_%28Unsplash_tGz5VuJPOV8%29.jpg/960px-Sydney_Opera_House%2C_Sydney%2C_Australia_%28Unsplash_tGz5VuJPOV8%29.jpg"
+  },
+  {
+    "file": "sample-data/commons/bigben_london_1.jpg",
+    "label": "bigben_london",
+    "true_lat": 51.5007,
+    "true_lon": -0.1246,
+    "source": "wikimedia_commons",
+    "title": "File:Big Ben, London (7601809348).jpg",
+    "license": "CC BY 2.0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/57/Big_Ben%2C_London_%287601809348%29.jpg/960px-Big_Ben%2C_London_%287601809348%29.jpg"
+  },
+  {
+    "file": "sample-data/commons/bigben_london_2.jpg",
+    "label": "bigben_london",
+    "true_lat": 51.5007,
+    "true_lon": -0.1246,
+    "source": "wikimedia_commons",
+    "title": "File:Elizabeth Tower, home of Big Ben - panoramio.jpg",
+    "license": "CC BY 3.0",
+    "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dc/Elizabeth_Tower%2C_home_of_Big_Ben_-_panoramio.jpg/960px-Elizabeth_Tower%2C_home_of_Big_Ben_-_panoramio.jpg"
+  }
+]

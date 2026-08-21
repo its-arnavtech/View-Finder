@@ -1,0 +1,122 @@
+{
+  "input": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/sydney_opera_2.jpg",
+  "input_type": "image",
+  "source": {
+    "kind": "local_file",
+    "path": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/sydney_opera_2.jpg"
+  },
+  "prediction": {
+    "latitude": 47.663578,
+    "longitude": -122.72808,
+    "country": "US",
+    "admin1": "Washington",
+    "city": "Silverdale",
+    "confidence_percent": 74.7,
+    "support_count": 1,
+    "candidate_count": 4,
+    "top_similarity": 0.5198
+  },
+  "predictions": [
+    {
+      "rank": 1,
+      "lat": 47.663578,
+      "lon": -122.72808,
+      "confidence": 74.7,
+      "support_count": 1,
+      "candidate_count": 4,
+      "top_similarity": 0.5198,
+      "country": "US",
+      "admin1": "Washington",
+      "city": "Silverdale",
+      "confidence_details": {
+        "confidence_percent": 74.7,
+        "signals": {
+          "similarity_strength_and_consistency": 0.8035,
+          "geographic_agreement": 0.8756,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    },
+    {
+      "rank": 2,
+      "lat": 40.285165,
+      "lon": -124.059891,
+      "confidence": 63.7,
+      "support_count": 1,
+      "candidate_count": 1,
+      "top_similarity": 0.4205,
+      "country": "US",
+      "admin1": "California",
+      "city": "Rio Dell",
+      "confidence_details": {
+        "confidence_percent": 63.7,
+        "signals": {
+          "similarity_strength_and_consistency": 0.809,
+          "geographic_agreement": 0.5,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    }
+  ],
+  "alternatives": [
+    {
+      "rank": 2,
+      "lat": 40.285165,
+      "lon": -124.059891,
+      "confidence": 63.7,
+      "support_count": 1,
+      "candidate_count": 1,
+      "top_similarity": 0.4205,
+      "country": "US",
+      "admin1": "California",
+      "city": "Rio Dell",
+      "confidence_details": {
+        "confidence_percent": 63.7,
+        "signals": {
+          "similarity_strength_and_consistency": 0.809,
+          "geographic_agreement": 0.5,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    }
+  ],
+  "predictor": "retrieval",
+  "weak_similarity_threshold": 0.6,
+  "processing": {
+    "candidates_returned": 5,
+    "clusters_returned": 2,
+    "gallery_images_matched": 5,
+    "gallery_size": 1305,
+    "top_similarity": 0.5198
+  },
+  "gallery": {
+    "path": "/Users/pomoika/Documents/GitHub_repo/View-Finder/gallery-pipeline/data/target-regions/gallery/v2",
+    "version": 2,
+    "image_count": 1305,
+    "embedding_dimension": 512,
+    "embedding_model": "open_clip:ViT-B-32:laion2b_s34b_b79k",
+    "tiles_covered": 69,
+    "geographic_coverage": {
+      "North America": 1305
+    },
+    "experimental": false
+  }
+}

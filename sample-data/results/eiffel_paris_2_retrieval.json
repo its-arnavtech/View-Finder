@@ -1,0 +1,174 @@
+{
+  "input": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/eiffel_paris_2.jpg",
+  "input_type": "image",
+  "source": {
+    "kind": "local_file",
+    "path": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/eiffel_paris_2.jpg"
+  },
+  "prediction": {
+    "latitude": 47.949895,
+    "longitude": -122.883862,
+    "country": "US",
+    "admin1": "Washington",
+    "city": "Port Hadlock-Irondale",
+    "confidence_percent": 80.8,
+    "support_count": 1,
+    "candidate_count": 2,
+    "top_similarity": 0.6073
+  },
+  "predictions": [
+    {
+      "rank": 1,
+      "lat": 47.949895,
+      "lon": -122.883862,
+      "confidence": 80.8,
+      "support_count": 1,
+      "candidate_count": 2,
+      "top_similarity": 0.6073,
+      "country": "US",
+      "admin1": "Washington",
+      "city": "Port Hadlock-Irondale",
+      "confidence_details": {
+        "confidence_percent": 80.8,
+        "signals": {
+          "similarity_strength_and_consistency": 0.8465,
+          "geographic_agreement": 0.9999,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    },
+    {
+      "rank": 2,
+      "lat": 40.31745,
+      "lon": -124.012076,
+      "confidence": 79.3,
+      "support_count": 1,
+      "candidate_count": 2,
+      "top_similarity": 0.5234,
+      "country": "US",
+      "admin1": "California",
+      "city": "Rio Dell",
+      "confidence_details": {
+        "confidence_percent": 79.3,
+        "signals": {
+          "similarity_strength_and_consistency": 0.8392,
+          "geographic_agreement": 0.9641,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    },
+    {
+      "rank": 3,
+      "lat": 47.499786,
+      "lon": -122.644187,
+      "confidence": 66.9,
+      "support_count": 1,
+      "candidate_count": 1,
+      "top_similarity": 0.5265,
+      "country": "US",
+      "admin1": "Washington",
+      "city": "Bethel",
+      "confidence_details": {
+        "confidence_percent": 66.9,
+        "signals": {
+          "similarity_strength_and_consistency": 0.8668,
+          "geographic_agreement": 0.5,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    }
+  ],
+  "alternatives": [
+    {
+      "rank": 2,
+      "lat": 40.31745,
+      "lon": -124.012076,
+      "confidence": 79.3,
+      "support_count": 1,
+      "candidate_count": 2,
+      "top_similarity": 0.5234,
+      "country": "US",
+      "admin1": "California",
+      "city": "Rio Dell",
+      "confidence_details": {
+        "confidence_percent": 79.3,
+        "signals": {
+          "similarity_strength_and_consistency": 0.8392,
+          "geographic_agreement": 0.9641,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    },
+    {
+      "rank": 3,
+      "lat": 47.499786,
+      "lon": -122.644187,
+      "confidence": 66.9,
+      "support_count": 1,
+      "candidate_count": 1,
+      "top_similarity": 0.5265,
+      "country": "US",
+      "admin1": "Washington",
+      "city": "Bethel",
+      "confidence_details": {
+        "confidence_percent": 66.9,
+        "signals": {
+          "similarity_strength_and_consistency": 0.8668,
+          "geographic_agreement": 0.5,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    }
+  ],
+  "predictor": "retrieval",
+  "weak_similarity_threshold": 0.6,
+  "processing": {
+    "candidates_returned": 5,
+    "clusters_returned": 3,
+    "gallery_images_matched": 5,
+    "gallery_size": 1305,
+    "top_similarity": 0.6073
+  },
+  "gallery": {
+    "path": "/Users/pomoika/Documents/GitHub_repo/View-Finder/gallery-pipeline/data/target-regions/gallery/v2",
+    "version": 2,
+    "image_count": 1305,
+    "embedding_dimension": 512,
+    "embedding_model": "open_clip:ViT-B-32:laion2b_s34b_b79k",
+    "tiles_covered": 69,
+    "geographic_coverage": {
+      "North America": 1305
+    },
+    "experimental": false
+  }
+}

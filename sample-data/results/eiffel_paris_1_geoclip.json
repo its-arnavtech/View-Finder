@@ -1,0 +1,53 @@
+{
+  "input": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/eiffel_paris_1.jpg",
+  "input_type": "image",
+  "source": {
+    "kind": "local_file",
+    "path": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/eiffel_paris_1.jpg"
+  },
+  "prediction": {
+    "latitude": 48.859188,
+    "longitude": 2.293585,
+    "country": "FR",
+    "admin1": "Ile-de-France",
+    "city": "Neuilly-sur-Seine",
+    "confidence_percent": 88.5,
+    "support_count": 1,
+    "candidate_count": 5,
+    "top_similarity": 0.0083
+  },
+  "predictions": [
+    {
+      "rank": 1,
+      "lat": 48.859188,
+      "lon": 2.293585,
+      "confidence": 88.5,
+      "support_count": 1,
+      "candidate_count": 5,
+      "top_similarity": 0.0083,
+      "country": "FR",
+      "admin1": "Ile-de-France",
+      "city": "Neuilly-sur-Seine",
+      "confidence_details": {
+        "confidence_percent": 88.5,
+        "signals": {
+          "similarity_strength_and_consistency": 0.9857,
+          "geographic_agreement": 0.9997,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    }
+  ],
+  "alternatives": [],
+  "predictor": "geoclip",
+  "processing": {
+    "candidates_returned": 5,
+    "clusters_returned": 1
+  }
+}

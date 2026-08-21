@@ -1,0 +1,434 @@
+[
+  {
+    "label": "eiffel_paris",
+    "file": "eiffel_paris_1.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 48.8584,
+        "lon": 2.2945,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 48.85919,
+        "lon": 2.29359,
+        "error_km": 0.1,
+        "confidence": 88.5,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 47.57723,
+        "lon": -122.65667,
+        "error_km": 8055.3,
+        "confidence": 84.6,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "eiffel_paris",
+    "file": "eiffel_paris_2.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 48.8584,
+        "lon": 2.2945,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 36.76883,
+        "lon": 3.04334,
+        "error_km": 1345.7,
+        "confidence": 79.8,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 47.94989,
+        "lon": -122.88386,
+        "error_km": 8030.7,
+        "confidence": 80.8,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "golden_gate_sf",
+    "file": "golden_gate_sf_1.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 37.8199,
+        "lon": -122.4783,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 37.81346,
+        "lon": -122.47822,
+        "error_km": 0.7,
+        "confidence": 86.8,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 47.62926,
+        "lon": -122.77973,
+        "error_km": 1091.0,
+        "confidence": 83.2,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "golden_gate_sf",
+    "file": "golden_gate_sf_2.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 37.8199,
+        "lon": -122.4783,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 37.82614,
+        "lon": -122.47956,
+        "error_km": 0.7,
+        "confidence": 88.1,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 47.66348,
+        "lon": -122.71364,
+        "error_km": 1094.7,
+        "confidence": 77.9,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "mount_rainier",
+    "file": "mount_rainier_1.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 46.8523,
+        "lon": -121.7603,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 46.78617,
+        "lon": -121.73769,
+        "error_km": 7.6,
+        "confidence": 83.4,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 40.29778,
+        "lon": -123.85289,
+        "error_km": 748.0,
+        "confidence": 87.5,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "mount_rainier",
+    "file": "mount_rainier_2.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 46.8523,
+        "lon": -121.7603,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 49.94514,
+        "lon": -123.08329,
+        "error_km": 357.5,
+        "confidence": 62.6,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 47.65533,
+        "lon": -122.81364,
+        "error_km": 119.6,
+        "confidence": 82.3,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "colosseum_rome",
+    "file": "colosseum_rome_1.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 41.8902,
+        "lon": 12.4922,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 41.89006,
+        "lon": 12.49118,
+        "error_km": 0.1,
+        "confidence": 87.9,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 40.32081,
+        "lon": -124.03809,
+        "error_km": 9879.2,
+        "confidence": 83.3,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "colosseum_rome",
+    "file": "colosseum_rome_2.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 41.8902,
+        "lon": 12.4922,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 41.89082,
+        "lon": 12.49037,
+        "error_km": 0.2,
+        "confidence": 86.0,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 40.32398,
+        "lon": -124.03577,
+        "error_km": 9878.8,
+        "confidence": 85.1,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "tokyo_tower",
+    "file": "tokyo_tower_1.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 35.6586,
+        "lon": 139.7454,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 35.66214,
+        "lon": 139.73441,
+        "error_km": 1.1,
+        "confidence": 88.4,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 47.58699,
+        "lon": -122.66832,
+        "error_km": 7674.6,
+        "confidence": 84.6,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "tokyo_tower",
+    "file": "tokyo_tower_2.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 35.6586,
+        "lon": 139.7454,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 34.39258,
+        "lon": 132.44614,
+        "error_km": 679.2,
+        "confidence": 84.0,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 47.79631,
+        "lon": -122.78095,
+        "error_km": 7655.6,
+        "confidence": 80.3,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "statue_liberty_nyc",
+    "file": "statue_liberty_nyc_1.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 40.6892,
+        "lon": -74.0445,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 40.69161,
+        "lon": -74.03813,
+        "error_km": 0.6,
+        "confidence": 77.3,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 47.721,
+        "lon": -122.74653,
+        "error_km": 3893.2,
+        "confidence": 84.0,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "statue_liberty_nyc",
+    "file": "statue_liberty_nyc_2.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 40.6892,
+        "lon": -74.0445,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 40.68937,
+        "lon": -74.04487,
+        "error_km": 0.0,
+        "confidence": 88.7,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 47.60635,
+        "lon": -122.79136,
+        "error_km": 3898.1,
+        "confidence": 84.2,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "sydney_opera",
+    "file": "sydney_opera_1.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": -33.8568,
+        "lon": 151.2153,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": -33.8561,
+        "lon": 151.21536,
+        "error_km": 0.1,
+        "confidence": 85.6,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 47.7021,
+        "lon": -122.74478,
+        "error_km": 12446.1,
+        "confidence": 77.6,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "sydney_opera",
+    "file": "sydney_opera_2.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": -33.8568,
+        "lon": 151.2153,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 39.45445,
+        "lon": -0.35214,
+        "error_km": 17415.3,
+        "confidence": 86.2,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 47.66358,
+        "lon": -122.72808,
+        "error_km": 12445.3,
+        "confidence": 74.7,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "bigben_london",
+    "file": "bigben_london_1.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 51.5007,
+        "lon": -0.1246,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 51.50071,
+        "lon": -0.12553,
+        "error_km": 0.1,
+        "confidence": 87.9,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 47.73967,
+        "lon": -122.72584,
+        "error_km": 7704.6,
+        "confidence": 82.5,
+        "note": ""
+      }
+    }
+  },
+  {
+    "label": "bigben_london",
+    "file": "bigben_london_2.jpg",
+    "predictors": {
+      "hybrid": {
+        "lat": 51.5007,
+        "lon": -0.1246,
+        "error_km": 0.0,
+        "confidence": null,
+        "note": ""
+      },
+      "geoclip": {
+        "lat": 51.49958,
+        "lon": -0.12509,
+        "error_km": 0.1,
+        "confidence": 84.9,
+        "note": ""
+      },
+      "retrieval": {
+        "lat": 47.83544,
+        "lon": -122.75931,
+        "error_km": 7697.2,
+        "confidence": 84.2,
+        "note": ""
+      }
+    }
+  }
+]

@@ -1,0 +1,53 @@
+{
+  "input": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/statue_liberty_nyc_2.jpg",
+  "input_type": "image",
+  "source": {
+    "kind": "local_file",
+    "path": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/statue_liberty_nyc_2.jpg"
+  },
+  "prediction": {
+    "latitude": 40.689366,
+    "longitude": -74.044873,
+    "country": "US",
+    "admin1": "New York",
+    "city": "New York City",
+    "confidence_percent": 88.7,
+    "support_count": 1,
+    "candidate_count": 5,
+    "top_similarity": 0.0584
+  },
+  "predictions": [
+    {
+      "rank": 1,
+      "lat": 40.689366,
+      "lon": -74.044873,
+      "confidence": 88.7,
+      "support_count": 1,
+      "candidate_count": 5,
+      "top_similarity": 0.0584,
+      "country": "US",
+      "admin1": "New York",
+      "city": "New York City",
+      "confidence_details": {
+        "confidence_percent": 88.7,
+        "signals": {
+          "similarity_strength_and_consistency": 0.9893,
+          "geographic_agreement": 0.9998,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    }
+  ],
+  "alternatives": [],
+  "predictor": "geoclip",
+  "processing": {
+    "candidates_returned": 5,
+    "clusters_returned": 1
+  }
+}

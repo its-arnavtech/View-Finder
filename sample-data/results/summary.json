@@ -1,0 +1,466 @@
+[
+  {
+    "label": "eiffel_paris",
+    "file": "sample-data/commons/eiffel_paris_1.jpg",
+    "true": [
+      48.8584,
+      2.2945
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 48.8584,
+        "lon": 2.2945,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "Vanves",
+        "country": "FR"
+      },
+      "geoclip": {
+        "lat": 48.859188,
+        "lon": 2.293585,
+        "error_km": 0.1,
+        "confidence": 88.5,
+        "city": "Neuilly-sur-Seine",
+        "country": "FR"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "eiffel_paris",
+    "file": "sample-data/commons/eiffel_paris_2.jpg",
+    "true": [
+      48.8584,
+      2.2945
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 48.8584,
+        "lon": 2.2945,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "Vanves",
+        "country": "FR"
+      },
+      "geoclip": {
+        "lat": 36.768829,
+        "lon": 3.043336,
+        "error_km": 1345.7,
+        "confidence": 79.8,
+        "city": "Algiers",
+        "country": "DZ"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "golden_gate_sf",
+    "file": "sample-data/commons/golden_gate_sf_1.jpg",
+    "true": [
+      37.8199,
+      -122.4783
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 37.8199,
+        "lon": -122.4783,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "Sausalito",
+        "country": "US"
+      },
+      "geoclip": {
+        "lat": 37.813462,
+        "lon": -122.478218,
+        "error_km": 0.7,
+        "confidence": 86.8,
+        "city": "Sausalito",
+        "country": "US"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "golden_gate_sf",
+    "file": "sample-data/commons/golden_gate_sf_2.jpg",
+    "true": [
+      37.8199,
+      -122.4783
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 37.8199,
+        "lon": -122.4783,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "Sausalito",
+        "country": "US"
+      },
+      "geoclip": {
+        "lat": 37.826137,
+        "lon": -122.479562,
+        "error_km": 0.7,
+        "confidence": 88.1,
+        "city": "Sausalito",
+        "country": "US"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "mount_rainier",
+    "file": "sample-data/commons/mount_rainier_1.jpg",
+    "true": [
+      46.8523,
+      -121.7603
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 46.8523,
+        "lon": -121.7603,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "Buckley",
+        "country": "US"
+      },
+      "geoclip": {
+        "lat": 46.786167,
+        "lon": -121.737693,
+        "error_km": 7.6,
+        "confidence": 83.4,
+        "city": "Buckley",
+        "country": "US"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "mount_rainier",
+    "file": "sample-data/commons/mount_rainier_2.jpg",
+    "true": [
+      46.8523,
+      -121.7603
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 46.8523,
+        "lon": -121.7603,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "Buckley",
+        "country": "US"
+      },
+      "geoclip": {
+        "lat": 49.94514,
+        "lon": -123.083293,
+        "error_km": 357.5,
+        "confidence": 62.6,
+        "city": "Whistler",
+        "country": "CA"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "colosseum_rome",
+    "file": "sample-data/commons/colosseum_rome_1.jpg",
+    "true": [
+      41.8902,
+      12.4922
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 41.8902,
+        "lon": 12.4922,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "Rome",
+        "country": "IT"
+      },
+      "geoclip": {
+        "lat": 41.890061,
+        "lon": 12.491176,
+        "error_km": 0.1,
+        "confidence": 87.9,
+        "city": "Rome",
+        "country": "IT"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "colosseum_rome",
+    "file": "sample-data/commons/colosseum_rome_2.jpg",
+    "true": [
+      41.8902,
+      12.4922
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 41.8902,
+        "lon": 12.4922,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "Rome",
+        "country": "IT"
+      },
+      "geoclip": {
+        "lat": 41.890815,
+        "lon": 12.490368,
+        "error_km": 0.2,
+        "confidence": 86.0,
+        "city": "Rome",
+        "country": "IT"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "tokyo_tower",
+    "file": "sample-data/commons/tokyo_tower_1.jpg",
+    "true": [
+      35.6586,
+      139.7454
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 35.6586,
+        "lon": 139.7454,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "Tokyo",
+        "country": "JP"
+      },
+      "geoclip": {
+        "lat": 35.662143,
+        "lon": 139.734413,
+        "error_km": 1.1,
+        "confidence": 88.4,
+        "city": "Tokyo",
+        "country": "JP"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "tokyo_tower",
+    "file": "sample-data/commons/tokyo_tower_2.jpg",
+    "true": [
+      35.6586,
+      139.7454
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 35.6586,
+        "lon": 139.7454,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "Tokyo",
+        "country": "JP"
+      },
+      "geoclip": {
+        "lat": 34.392581,
+        "lon": 132.446143,
+        "error_km": 679.2,
+        "confidence": 84.0,
+        "city": "Hiroshima-shi",
+        "country": "JP"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "statue_liberty_nyc",
+    "file": "sample-data/commons/statue_liberty_nyc_1.jpg",
+    "true": [
+      40.6892,
+      -74.0445
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 40.6892,
+        "lon": -74.0445,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "New York City",
+        "country": "US"
+      },
+      "geoclip": {
+        "lat": 40.691607,
+        "lon": -74.038135,
+        "error_km": 0.6,
+        "confidence": 77.3,
+        "city": "New York City",
+        "country": "US"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "statue_liberty_nyc",
+    "file": "sample-data/commons/statue_liberty_nyc_2.jpg",
+    "true": [
+      40.6892,
+      -74.0445
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 40.6892,
+        "lon": -74.0445,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "New York City",
+        "country": "US"
+      },
+      "geoclip": {
+        "lat": 40.689366,
+        "lon": -74.044873,
+        "error_km": 0.0,
+        "confidence": 88.7,
+        "city": "New York City",
+        "country": "US"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "sydney_opera",
+    "file": "sample-data/commons/sydney_opera_1.jpg",
+    "true": [
+      -33.8568,
+      151.2153
+    ],
+    "results": {
+      "hybrid": {
+        "lat": -33.8568,
+        "lon": 151.2153,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "Kirribilli",
+        "country": "AU"
+      },
+      "geoclip": {
+        "lat": -33.856102,
+        "lon": 151.215359,
+        "error_km": 0.1,
+        "confidence": 85.6,
+        "city": "Kirribilli",
+        "country": "AU"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "sydney_opera",
+    "file": "sample-data/commons/sydney_opera_2.jpg",
+    "true": [
+      -33.8568,
+      151.2153
+    ],
+    "results": {
+      "hybrid": {
+        "lat": -33.8568,
+        "lon": 151.2153,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "Kirribilli",
+        "country": "AU"
+      },
+      "geoclip": {
+        "lat": 39.454449,
+        "lon": -0.352139,
+        "error_km": 17415.3,
+        "confidence": 86.2,
+        "city": "Valencia",
+        "country": "ES"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "bigben_london",
+    "file": "sample-data/commons/bigben_london_1.jpg",
+    "true": [
+      51.5007,
+      -0.1246
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 51.5007,
+        "lon": -0.1246,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "London",
+        "country": "GB"
+      },
+      "geoclip": {
+        "lat": 51.500711,
+        "lon": -0.125526,
+        "error_km": 0.1,
+        "confidence": 87.9,
+        "city": "London",
+        "country": "GB"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  },
+  {
+    "label": "bigben_london",
+    "file": "sample-data/commons/bigben_london_2.jpg",
+    "true": [
+      51.5007,
+      -0.1246
+    ],
+    "results": {
+      "hybrid": {
+        "lat": 51.5007,
+        "lon": -0.1246,
+        "error_km": 0.0,
+        "confidence": null,
+        "city": "London",
+        "country": "GB"
+      },
+      "geoclip": {
+        "lat": 51.499577,
+        "lon": -0.125087,
+        "error_km": 0.1,
+        "confidence": 84.9,
+        "city": "City of Westminster",
+        "country": "GB"
+      },
+      "retrieval": {
+        "error": "exit -11: "
+      }
+    }
+  }
+]

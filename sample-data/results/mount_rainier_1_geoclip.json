@@ -1,0 +1,53 @@
+{
+  "input": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/mount_rainier_1.jpg",
+  "input_type": "image",
+  "source": {
+    "kind": "local_file",
+    "path": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/mount_rainier_1.jpg"
+  },
+  "prediction": {
+    "latitude": 46.786167,
+    "longitude": -121.737693,
+    "country": "US",
+    "admin1": "Washington",
+    "city": "Buckley",
+    "confidence_percent": 83.4,
+    "support_count": 1,
+    "candidate_count": 5,
+    "top_similarity": 0.0918
+  },
+  "predictions": [
+    {
+      "rank": 1,
+      "lat": 46.786167,
+      "lon": -121.737693,
+      "confidence": 83.4,
+      "support_count": 1,
+      "candidate_count": 5,
+      "top_similarity": 0.0918,
+      "country": "US",
+      "admin1": "Washington",
+      "city": "Buckley",
+      "confidence_details": {
+        "confidence_percent": 83.4,
+        "signals": {
+          "similarity_strength_and_consistency": 0.8955,
+          "geographic_agreement": 0.9977,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    }
+  ],
+  "alternatives": [],
+  "predictor": "geoclip",
+  "processing": {
+    "candidates_returned": 5,
+    "clusters_returned": 1
+  }
+}

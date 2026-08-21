@@ -1,0 +1,53 @@
+{
+  "input": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/sydney_opera_1.jpg",
+  "input_type": "image",
+  "source": {
+    "kind": "local_file",
+    "path": "/Users/pomoika/Documents/GitHub_repo/View-Finder/sample-data/commons/sydney_opera_1.jpg"
+  },
+  "prediction": {
+    "latitude": -33.856102,
+    "longitude": 151.215359,
+    "country": "AU",
+    "admin1": "New South Wales",
+    "city": "Kirribilli",
+    "confidence_percent": 85.6,
+    "support_count": 1,
+    "candidate_count": 5,
+    "top_similarity": 0.0192
+  },
+  "predictions": [
+    {
+      "rank": 1,
+      "lat": -33.856102,
+      "lon": 151.215359,
+      "confidence": 85.6,
+      "support_count": 1,
+      "candidate_count": 5,
+      "top_similarity": 0.0192,
+      "country": "AU",
+      "admin1": "New South Wales",
+      "city": "Kirribilli",
+      "confidence_details": {
+        "confidence_percent": 85.6,
+        "signals": {
+          "similarity_strength_and_consistency": 0.9333,
+          "geographic_agreement": 0.9994,
+          "cross_frame_agreement": null,
+          "support_reliability": 0.2835
+        },
+        "weights": {
+          "similarity": 0.55,
+          "geographic": 0.3,
+          "support": 0.15
+        }
+      }
+    }
+  ],
+  "alternatives": [],
+  "predictor": "geoclip",
+  "processing": {
+    "candidates_returned": 5,
+    "clusters_returned": 1
+  }
+}

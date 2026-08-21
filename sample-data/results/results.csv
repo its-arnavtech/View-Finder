@@ -1,0 +1,49 @@
+label,file,predictor,lat,lon,error_km,confidence,note
+eiffel_paris,eiffel_paris_1.jpg,hybrid,48.85840,2.29450,0.0,None,
+eiffel_paris,eiffel_paris_1.jpg,geoclip,48.85919,2.29359,0.1,88.5,
+eiffel_paris,eiffel_paris_1.jpg,retrieval,,,,,exit -11: 
+eiffel_paris,eiffel_paris_2.jpg,hybrid,48.85840,2.29450,0.0,None,
+eiffel_paris,eiffel_paris_2.jpg,geoclip,36.76883,3.04334,1345.7,79.8,
+eiffel_paris,eiffel_paris_2.jpg,retrieval,,,,,exit -11: 
+golden_gate_sf,golden_gate_sf_1.jpg,hybrid,37.81990,-122.47830,0.0,None,
+golden_gate_sf,golden_gate_sf_1.jpg,geoclip,37.81346,-122.47822,0.7,86.8,
+golden_gate_sf,golden_gate_sf_1.jpg,retrieval,,,,,exit -11: 
+golden_gate_sf,golden_gate_sf_2.jpg,hybrid,37.81990,-122.47830,0.0,None,
+golden_gate_sf,golden_gate_sf_2.jpg,geoclip,37.82614,-122.47956,0.7,88.1,
+golden_gate_sf,golden_gate_sf_2.jpg,retrieval,,,,,exit -11: 
+mount_rainier,mount_rainier_1.jpg,hybrid,46.85230,-121.76030,0.0,None,
+mount_rainier,mount_rainier_1.jpg,geoclip,46.78617,-121.73769,7.6,83.4,
+mount_rainier,mount_rainier_1.jpg,retrieval,,,,,exit -11: 
+mount_rainier,mount_rainier_2.jpg,hybrid,46.85230,-121.76030,0.0,None,
+mount_rainier,mount_rainier_2.jpg,geoclip,49.94514,-123.08329,357.5,62.6,
+mount_rainier,mount_rainier_2.jpg,retrieval,,,,,exit -11: 
+colosseum_rome,colosseum_rome_1.jpg,hybrid,41.89020,12.49220,0.0,None,
+colosseum_rome,colosseum_rome_1.jpg,geoclip,41.89006,12.49118,0.1,87.9,
+colosseum_rome,colosseum_rome_1.jpg,retrieval,,,,,exit -11: 
+colosseum_rome,colosseum_rome_2.jpg,hybrid,41.89020,12.49220,0.0,None,
+colosseum_rome,colosseum_rome_2.jpg,geoclip,41.89082,12.49037,0.2,86.0,
+colosseum_rome,colosseum_rome_2.jpg,retrieval,,,,,exit -11: 
+tokyo_tower,tokyo_tower_1.jpg,hybrid,35.65860,139.74540,0.0,None,
+tokyo_tower,tokyo_tower_1.jpg,geoclip,35.66214,139.73441,1.1,88.4,
+tokyo_tower,tokyo_tower_1.jpg,retrieval,,,,,exit -11: 
+tokyo_tower,tokyo_tower_2.jpg,hybrid,35.65860,139.74540,0.0,None,
+tokyo_tower,tokyo_tower_2.jpg,geoclip,34.39258,132.44614,679.2,84.0,
+tokyo_tower,tokyo_tower_2.jpg,retrieval,,,,,exit -11: 
+statue_liberty_nyc,statue_liberty_nyc_1.jpg,hybrid,40.68920,-74.04450,0.0,None,
+statue_liberty_nyc,statue_liberty_nyc_1.jpg,geoclip,40.69161,-74.03813,0.6,77.3,
+statue_liberty_nyc,statue_liberty_nyc_1.jpg,retrieval,,,,,exit -11: 
+statue_liberty_nyc,statue_liberty_nyc_2.jpg,hybrid,40.68920,-74.04450,0.0,None,
+statue_liberty_nyc,statue_liberty_nyc_2.jpg,geoclip,40.68937,-74.04487,0.0,88.7,
+statue_liberty_nyc,statue_liberty_nyc_2.jpg,retrieval,,,,,exit -11: 
+sydney_opera,sydney_opera_1.jpg,hybrid,-33.85680,151.21530,0.0,None,
+sydney_opera,sydney_opera_1.jpg,geoclip,-33.85610,151.21536,0.1,85.6,
+sydney_opera,sydney_opera_1.jpg,retrieval,,,,,exit -11: 
+sydney_opera,sydney_opera_2.jpg,hybrid,-33.85680,151.21530,0.0,None,
+sydney_opera,sydney_opera_2.jpg,geoclip,39.45445,-0.35214,17415.3,86.2,
+sydney_opera,sydney_opera_2.jpg,retrieval,,,,,exit -11: 
+bigben_london,bigben_london_1.jpg,hybrid,51.50070,-0.12460,0.0,None,
+bigben_london,bigben_london_1.jpg,geoclip,51.50071,-0.12553,0.1,87.9,
+bigben_london,bigben_london_1.jpg,retrieval,,,,,exit -11: 
+bigben_london,bigben_london_2.jpg,hybrid,51.50070,-0.12460,0.0,None,
+bigben_london,bigben_london_2.jpg,geoclip,51.49958,-0.12509,0.1,84.9,
+bigben_london,bigben_london_2.jpg,retrieval,,,,,exit -11: 
