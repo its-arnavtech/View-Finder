@@ -218,3 +218,43 @@ was judged on:
   outside the frame is a plausible blur, not a reconstruction. Generative
   outpainting/inpainting is the next quality step (architecture §9), and it
   needs a much larger model.
+
+## 8. Quality pass 3: learned inpainting (LaMa)
+
+Eight photos the engine had never been tuned on (a girl in a chicken coop,
+a German street, Los Angeles, a Virginia cave, bronze bulls in Madrid,
+New York, a Taipei stone lion, a Virgin Islands beach) were rendered from
+the eight preview poses. The two weakest things on the sheets were the
+blurred surround when looking left or right, and smeared fills where hidden
+areas open up (the bulls, the lion, the cave). Both are invented content,
+so this pass tried a learned inpainter: LaMa (OpenCV Model Zoo ONNX export,
+Apache-2.0, ~93 MB), run by ONNX Runtime on the CPU (architecture §3.9).
+
+### Findings
+
+| # | Experiment | Result | Decision |
+|---|---|---|---|
+| L1 | LaMa outpainting the **360° surround**, photo projected into a 200° equirectangular window | Every scene collapsed into the same grey-green texture; even the pink granite plaza and the orange cave lost their colours | Not used. |
+| L2 | The surround grown in steps of 1.6×, so that LaMa never invents more than ~60% of its input | Collapsed in the first step: generic mossy noise round the coop | Not used. The surround stays profile-based, which at least keeps each scene's colours. |
+| L3 | LaMa for the **frame pad** (the 12% border the mesh extends past the photo) | Texture and structure carry on past the frame: granite and a bull's tail (Madrid), the lion's tree, paving and wall (Taipei), rock all round (cave). The stretched-and-blurred pad was a smear by comparison. | Used. Only the outer two-thirds of the pad fade to the surround. |
+| L4 | LaMa for the **hidden background**, masking every non-donor pixel | Coherent far-side texture instead of push-pull's smears and bright blobs (cave), grass and wall behind the lion. Where most of an occluder stays visible to the model, it continues the occluder a little ("ghost" bull texture). | Used. Push-pull remains the fallback. |
+| L4b | Growing the mask over each whole occluder (geodesic, through pixels at least as near as the edge's mid-level) | Masked 52–56% of the canvas instead of 45–46%, with no visible change in the band the layer actually draws; the "ghost" fragments are occluder pixels the layer never replaces or shows | Not used. |
+| L5 | Session start took ~100 s | Full graph optimisation of this export, for no faster inference | Basic optimisation level: ~12 s, once per process. |
+| L6 | Passes took 10–58 s instead of ~3 s | ONNX Runtime's default of one thread per physical core put work on the Core Ultra's efficiency cores, and every step waited for them (worse on battery) | At most six intra-op threads: ~3 s per pass on battery. |
+
+### Results
+
+- **Contact sheets (eight fresh photos, eight poses).** Wherever the view
+  reaches the frame's edge, the scene now carries on: the coop fence, the
+  German courtyard wall (before: a bright stretched strip), Los Angeles'
+  paving (before: a beige smear across the lower left), the cave's rock.
+  Stepping sideways behind the girl in the coop shows dirt texture where
+  there were pink smears. No regressions in any pose. Turning far left or
+  right still ends in the soft profile surround (L1, L2).
+- **Stress harness with LaMa (mobile, 18 photos + 19 edge cases).** 35
+  worlds, 2 correct rejections, 0 failures, including the 8:1 panorama,
+  48×36, 16-bit, CMYK and all-black inputs. The cost is time: a median
+  mobile build of 8.5 s (laptop on battery, sharing the CPU with the
+  renderer), up from 0.5–1.5 s. `--inpaint none` restores the old speed.
+- **Tests.** 195 pass; the LaMa paths are covered by a stand-in inpainter,
+  plus one real-model test.

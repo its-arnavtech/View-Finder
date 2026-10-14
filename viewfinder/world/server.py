@@ -172,8 +172,10 @@ class JobRunner:
         store: WorldStore,
         max_pending: int = 8,
         builder: Callable[..., Any] = build_world,
+        inpainter: Any = None,
     ) -> None:
         self.estimator = estimator
+        self.inpainter = inpainter
         self.store = store
         self.max_pending = max_pending
         self.builder = builder
@@ -233,7 +235,13 @@ class JobRunner:
                 job.stage, job.progress = stage, fraction
 
             try:
-                result = self.builder(job.payload, profile=job.quality, estimator=self.estimator, progress=progress)
+                result = self.builder(
+                    job.payload,
+                    profile=job.quality,
+                    estimator=self.estimator,
+                    inpainter=self.inpainter,
+                    progress=progress,
+                )
                 world_id = uuid.uuid4().hex
                 self.store.save(world_id, result.glb, result.manifest)
                 job.world_id, job.status, job.progress = world_id, "done", 1.0
@@ -341,6 +349,7 @@ class WorldRequestHandler(BaseHTTPRequestHandler):
                 {
                     "status": "ok",
                     "depth": self.server.runner.estimator.describe(),
+                    "inpainting": self.server.runner.inpainter.describe() if self.server.runner.inpainter else None,
                     "pending": self.server.runner.pending(),
                     "profiles": list(PROFILES),
                 },
@@ -485,11 +494,11 @@ class ServeConfig:
     tls_key: Path | None = None
 
 
-def create_server(config: ServeConfig, estimator: DepthEstimator) -> WorldHTTPServer:
+def create_server(config: ServeConfig, estimator: DepthEstimator, inpainter: Any = None) -> WorldHTTPServer:
     needs_token = config.require_token if config.require_token is not None else not is_loopback(config.host)
     token = (config.token or new_token()) if needs_token else None
     store = WorldStore(config.store, config.max_worlds)
-    runner = JobRunner(estimator, store, max_pending=config.max_pending)
+    runner = JobRunner(estimator, store, max_pending=config.max_pending, inpainter=inpainter)
     server = WorldHTTPServer(
         (config.host, config.port),
         runner,

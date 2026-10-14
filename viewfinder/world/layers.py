@@ -9,9 +9,13 @@ moving the camera reveals a plausible continuation instead of a hole.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
+
+if TYPE_CHECKING:
+    from .inpaint import Inpainter
 
 # Below this provisional disparity a top-connected region is sky. Depth
 # Anything outputs exactly 0 for open sky (measured; PDD-REVIEW §1), so the
@@ -142,6 +146,7 @@ def background_layer(
     near_grid: np.ndarray,
     dilation_px: int,
     jump: float,
+    inpainter: "Inpainter | None" = None,
 ) -> BackgroundLayer:
     """Build the surface hidden behind foreground silhouettes.
 
@@ -153,6 +158,8 @@ def background_layer(
         near_grid: vertices on the near side of a disparity jump.
         dilation_px: how far behind a silhouette the layer extends, in pixels.
         jump: the profile's disparity jump threshold.
+        inpainter: fills the hidden colour with learned texture when given;
+            otherwise a smooth push-pull blend of the far side is used.
     """
     grid_height, grid_width = disparity.shape
     image_height, image_width = rgb.shape[:2]
@@ -176,5 +183,12 @@ def background_layer(
     radius = max(1, dilation_px // 2)
     unknown = occluder_pixels(pixel_disparity, radius, jump)
     sources = background_sources(pixel_disparity, radius, jump) & ~unknown
-    layer_rgb = propagate_background(rgb, unknown, sources)
+    if inpainter is not None and unknown.any():
+        # Everything that is not a donor is masked, not just the pixels to
+        # replace, so the model never sees (and continues) the occluder.
+        filled = inpainter.inpaint(rgb, ~sources)
+        layer_rgb = rgb.copy()
+        layer_rgb[unknown] = filled[unknown]
+    else:
+        layer_rgb = propagate_background(rgb, unknown, sources)
     return BackgroundLayer(region=region, disparity=layer_disparity, rgb=layer_rgb)

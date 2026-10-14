@@ -15,15 +15,20 @@ computer, and the depth model is downloaded once, explicitly.
 
 ## Setup
 
-One time, with network access, download the depth model (Depth Anything V2
-Small, ~100 MB, Apache-2.0):
+One time, with network access, download the models: Depth Anything V2
+Small (~100 MB) and LaMa inpainting (~93 MB), both Apache-2.0:
 
 ```bash
+python -m pip install -r viewfinder/requirements-world.txt   # optional: ONNX Runtime for LaMa
 view-finder world setup
 ```
 
-No new Python packages are needed. The engine runs on the pinned
-`torch`/`transformers`/`opencv`/`Pillow` stack in `viewfinder/requirements.txt`.
+The engine runs on the pinned `torch`/`transformers`/`opencv`/`Pillow` stack
+in `viewfinder/requirements.txt`. ONNX Runtime is optional. With it and the
+LaMa model, the border just outside the photo and the areas that foreground
+objects hide are filled with learned texture (rock, foliage, walls, paving)
+instead of a blur. Without it, the engine falls back to those blurs, and the
+server says which it is using when it starts.
 
 ## On your phone
 
@@ -60,7 +65,13 @@ view-finder world build photo.jpg                 # photo_world.glb + photo_worl
 view-finder world build photo.jpg --html          # + photo_world.html (one file, no server)
 view-finder world build photo.jpg --quality mobile --out worlds/
 view-finder world build photo.jpg --depth-model heuristic   # no model needed; crude depth
+view-finder world build photo.jpg --inpaint none  # skip LaMa (faster; blurred fills)
 ```
+
+`--inpaint` (also on `serve`) is `auto` by default: LaMa when it is
+installed, the rule-based fills otherwise. `lama` makes a missing model an
+error. LaMa adds two passes per world, about 1–3 s each on a desktop CPU
+(several times that on a laptop running on battery).
 
 The standalone `*_world.html` embeds everything, so you can send it to a
 phone and open it with no server. Use `--quality mobile` for files you plan
@@ -135,11 +146,12 @@ print(result.manifest["layers"])
 
 One photo only records one viewpoint. The world looks exactly like the photo
 from where it was taken and shows real depth as you move around it. Behind
-foreground objects you see a plausible smeared continuation, not the true
-hidden content. Beyond the frame the photo fades into a blurred 360°
-surround built from the photo itself (mirrored outward, fading to its sky
-and ground tones). Move far enough and the missing sides of
-objects show. That is why movement is limited by default.
+foreground objects you see a plausible continuation (inpainted by LaMa when
+installed), not the true hidden content. Just past the frame's edge the
+scene carries on for a while, then fades into a soft 360° surround built
+from the photo's own colours, row by row, fading to its sky and ground tones
+overhead and underfoot. Move far enough and the missing sides of objects
+show. That is why movement is limited by default.
 
 Depth is relative, so scenes are in normalised units, not metres. Glass,
 mirrors, water reflections and very fine structure (wires, leaves against
@@ -151,9 +163,9 @@ sky) are where monocular depth is least reliable.
 python -m pytest viewfinder/tests/ -k world
 ```
 
-All tests except one run without the depth model, using synthetic scenes
-with known geometry. The real-model test is skipped when the model is not
-installed.
+All tests except two run without any model, using synthetic scenes with
+known geometry and a stand-in inpainter. The real depth-model and LaMa tests
+are skipped when those models are not installed.
 
 ### Stress test: "any image in, a world out"
 
@@ -178,14 +190,19 @@ the FOV and navigation are sane. Results go to
 `local-data/world-stress/{results.csv,summary.json}`, and the script exits 1
 on any failure.
 
-### Visual check: how a world looks from six poses
+`--inpaint lama` runs the stress test with LaMa too (slow: it adds a few
+seconds per photo).
+
+### Visual check: how a world looks from eight poses
 
 ```bash
 python benchmark-harness/world_preview.py photo.jpg [more.jpg ...] --tag after
 ```
 
-This renders each world offline from six fixed poses (front, look left,
-look right, look up, a step to the navigation limit, free roam) into a
-contact sheet under `local-data/world-eval/`. It uses the viewer's camera
-model, fog and silhouette mask, so a pose there matches the browser. Use it
-to compare an engine change before and after across a set of photos.
+This renders each world offline from eight fixed poses (front, look left,
+look right, look up, a step to the navigation limit, walking in while
+looking left and down, free roam) into a contact sheet under
+`local-data/world-eval/`. It uses the viewer's camera model, fog and
+silhouette mask, so a pose there matches the browser. Use it to compare an
+engine change before and after across a set of photos. It builds with LaMa
+by default; `--inpaint none` shows the fallback.

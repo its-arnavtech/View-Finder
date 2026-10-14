@@ -177,28 +177,38 @@ frames, not the stitch. The working-size and mesh budgets are set by
     Background is by definition farther, so the farthest nearby surface is
     the best cheap estimate of what continues behind the occluder.
   - Colour: only true *occluder* pixels (nearer than something within the
-    radius by more than the jump) are replaced, at full resolution, with a
-    **push-pull** fill: donor colours are averaged down an image pyramid and
-    pulled back up, giving each hole the local background colour, soft and
-    continuous. Donors are far-side pixels and pixels with no silhouette
-    nearby; the near side of any jump (an occluder, including its rim) never
-    donates. History: Telea inpainting smeared both sides into flat grey and
-    took 3–6 s; a nearest-pixel (Voronoi) copy was fast but dragged straight
-    streaks out of every silhouette, which read as tearing when moving.
+    radius by more than the jump) are replaced, at full resolution. Donors
+    are far-side pixels and pixels with no silhouette nearby; the near side
+    of any jump (an occluder, including its rim) never donates.
+    - With **LaMa** installed (§3.9), every non-donor pixel is masked and
+      inpainted, so the model continues the far side's texture (rock,
+      grass, a wall) and never sees the occluder it is filling behind.
+    - Otherwise a **push-pull** fill: donor colours are averaged down an
+      image pyramid and pulled back up, giving each hole the local
+      background colour, soft and continuous.
+    - History: Telea inpainting smeared both sides into flat grey and took
+      3–6 s; a nearest-pixel (Voronoi) copy was fast but dragged straight
+      streaks out of every silhouette, which read as tearing when moving.
   - Meshed only over the region, with the same culling at 2× the threshold,
     and pushed back 1 % to avoid z-fighting with the foreground layer.
 
 ### 3.6 Environment ("the world around the photo")
 
 - **Frame extension.** The image and depth are padded by
-  `profile.pad_fraction` on every side. Colour is the photo's edge pixels
-  **stretched** outward (never mirrored: a mirrored border puts a symmetric
-  copy of the edge beside it, and symmetry is the first thing the eye
-  catches). Each pad is blurred *along its edge*, more the farther out it
-  is: side pads vertically, top and bottom pads horizontally. That removes
-  the stripes a stretch otherwise leaves. The pad then fades toward the
-  surround's colour in each pad pixel's direction, so the photo's edge
-  dissolves into the surround instead of ending in a wall.
+  `profile.pad_fraction` on every side.
+  - With **LaMa** installed (§3.9), the pad is outpainted: the scene's
+    texture and structure (a tree trunk, paving, a wall's courses) carry on
+    past the frame. Only the outer two-thirds of the pad fade to the
+    surround.
+  - Otherwise colour is the photo's edge pixels **stretched** outward
+    (never mirrored: a mirrored border puts a symmetric copy of the edge
+    beside it, and symmetry is the first thing the eye catches). Each pad is
+    blurred *along its edge*, more the farther out it is: side pads
+    vertically, top and bottom pads horizontally. That removes the stripes
+    a stretch otherwise leaves.
+  - Either way the pad fades toward the surround's colour in each pad
+    pixel's direction, so the photo's edge dissolves into the surround
+    instead of ending in a wall.
   Disparity is extrapolated linearly from each border's gradient, fading over
   the pad. A plane's disparity is affine in pixel coordinates, so floors and
   walls continue as themselves, while edge replication would build a
@@ -289,6 +299,34 @@ frames, not the stitch. The working-size and mesh budgets are set by
   provenance, stage timings and warnings.
 - **Standalone HTML** (optional): the viewer with the GLB inlined as base64.
   One file you can send to a phone and open with no server.
+
+### 3.9 Inpainting (optional)
+
+`inpaint.py` wraps **LaMa** (Suvorov et al., WACV 2022), using the OpenCV
+Model Zoo's ONNX export (`opencv/inpainting_lama`, ~93 MB, Apache-2.0) run
+by ONNX Runtime on the CPU. It is optional. `world setup` downloads it, it is
+only ever loaded from the local cache, and without it (or without
+`onnxruntime`) the rule-based fills above are used.
+
+- **Where it is used:** two passes per world, the frame pad (§3.6) and the
+  hidden background colour (§3.5). Both are thin bands next to real photo
+  content, which is where LaMa is strong.
+- **Where it is not, and why:** the 360° surround. Measured on the fresh
+  evaluation set: with the photo covering ~15% of an equirectangular
+  window, LaMa collapsed every scene (a pink granite plaza, an orange cave)
+  into the same grey-green texture. Growing the window in steps so that it
+  never invents more than ~60% of its input collapsed in the first step
+  too. The profile-based surround keeps the scene's own colours, which
+  matters more.
+- **Mechanics:** the model's input is fixed at 512×512, so images are
+  area-resized in and the result cubic-resized out. Only masked pixels are
+  taken from it; known pixels are never altered.
+- **Speed:** full graph optimisation made the session take ~100 s to build
+  (Core Ultra 9 185H) for no faster inference, so the basic level is used
+  (~12 s, once per process). ONNX Runtime's default of one thread per
+  physical core put work on the hybrid CPU's efficiency cores, and every
+  step waited for them (passes took 10–58 s). Capping it at six threads
+  gives ~3 s per pass on battery.
 
 ## 4. Viewer (phone-first)
 
@@ -423,9 +461,10 @@ viewfinder/tests/test_world_*.py
 
 ## 9. Extension seams (not built in v1)
 
-- **Better fills.** The `layers.background_fill` and
-  `environment.extend_frame` functions are the two places a generative
-  inpainter or outpainter would slot in.
+- **A generative surround.** LaMa fills thin bands well but collapses to a
+  generic texture when asked to invent most of an image (§3.9), so the 360°
+  surround stays profile-based. A diffusion outpainter would slot into
+  `environment.environment_map`.
 - **Smaller downloads.** Quantised positions (`KHR_mesh_quantization`) and
   meshopt compression slot into `gltf.py` and `glb.js` together.
 - **Video input.** Several frames give multi-view geometry, a different

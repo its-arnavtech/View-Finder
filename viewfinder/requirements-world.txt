@@ -1,0 +1,6 @@
+# Optional World Engine extras. The engine runs without them; with them, the
+# frame border and the areas foreground objects hide are filled by LaMa
+# (learned inpainting) instead of rule-based blurs.
+#   python -m pip install -r viewfinder/requirements-world.txt
+#   view-finder world setup        # downloads the LaMa model (~93 MB, Apache-2.0)
+onnxruntime==1.31.0

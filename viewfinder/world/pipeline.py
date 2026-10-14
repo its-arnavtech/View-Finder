@@ -38,6 +38,7 @@ from .geometry import (
 )
 from .gltf import GlbBuilder
 from .ingest import ImageSource, load_source
+from .inpaint import Inpainter
 from .layers import background_layer, detect_sky, sky_colors
 from .mesh import MeshData, foreground_mesh, grid_triangles, silhouette_mask, sky_mesh, surface_mesh
 from .profiles import QualityProfile, get_profile, profile_dict
@@ -109,9 +110,14 @@ def build_world(
     *,
     profile: str | QualityProfile | None = None,
     estimator: DepthEstimator | None = None,
+    inpainter: Inpainter | None = None,
     progress: Progress | None = None,
 ) -> WorldResult:
-    """Build an explorable layered 3D world from one photo."""
+    """Build an explorable layered 3D world from one photo.
+
+    ``inpainter`` (LaMa, see inpaint.py) outpaints the frame border and fills
+    what foreground objects hide. Without one, rule-based fills are used.
+    """
     profile = get_profile(profile)
     estimator = estimator or load_estimator()
     report = progress or (lambda stage, fraction: None)
@@ -184,7 +190,7 @@ def build_world(
     fade = cv2.resize(
         sample_environment(environment, coarse_rays), canvas_size, interpolation=cv2.INTER_LINEAR
     )
-    canvas = extend_frame(photo.rgb, normalized, sky, (pad_y, pad_x), fade_to=fade)
+    canvas = extend_frame(photo.rgb, normalized, sky, (pad_y, pad_x), fade_to=fade, inpainter=inpainter)
     grid = make_grid(canvas.rgb.shape[1], canvas.rgb.shape[0], profile.grid_long)
     pixel_disparity = to_scene_disparity(canvas.disparity, profile.far)
     # Collapse soft depth ramps at occlusions into single steps. Mesh and
@@ -213,6 +219,7 @@ def build_world(
         near,
         dilation_px,
         profile.edge_disparity_jump,
+        inpainter=inpainter,
     )
     mark("layers")
 
@@ -347,6 +354,7 @@ def build_world(
         "profile": profile.name,
         "profile_settings": profile_dict(profile),
         "depth": estimator.describe(),
+        "inpainting": inpainter.describe() if inpainter is not None else {"inpainter": "none"},
         "camera": {
             **intrinsics.as_dict(),
             "position": [0.0, 0.0, 0.0],
