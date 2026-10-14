@@ -1,10 +1,12 @@
 /* Camera + input for World Engine scenes.
  *
  * Two modes share one camera (position + yaw/pitch):
- *   orbit (default): 1-finger drag circles a pivot in front of the camera.
- *                    The camera translates, so the scene shows real parallax,
- *                    which is the whole point of a 3D photo.
- *   fly:             1-finger drag turns the head in place, to look around the world.
+ *   look (default): 1-finger drag / mouse drag turns the view, a full 360°
+ *                   around and up/down. The eye sits slightly in front of
+ *                   a "neck" pivot, so turning also shifts it a little,
+ *                   which gives real parallax the way turning your head does.
+ *   orbit:          1-finger drag circles a pivot in front of the camera,
+ *                   which shows the most depth.
  * In both: pinch / wheel = move forward/back, 2-finger drag / right-drag = strafe,
  * double-tap / R = reset, WASD+QE = move, arrows = turn.
  * Movement is clamped to the manifest's navigation box unless free roam is on. */
@@ -25,7 +27,7 @@
   function Controls(element, manifest, onChange) {
     this.element = element;
     this.onChange = onChange;
-    this.mode = "orbit";
+    this.mode = "look";
     this.freeRoam = false;
     this.pointers = {};
     this.keys = {};
@@ -42,6 +44,9 @@
     this.half = nav.half_extents;
     this.pivotDefault = Math.max(0.5, (nav.near_field_depth || 2) * 1.5);
     this.speed = Math.max(0.02, this.half[2]);
+    // Eye-to-neck distance for look mode, exaggerated from anatomy so the
+    // parallax is noticeable, and kept inside the navigation box.
+    this.neck = this.half[0] * 0.6;
     this.reset();
   };
 
@@ -49,8 +54,22 @@
     this.position = [0, 0, 0];
     this.yaw = 0;
     this.pitch = 0;
+    this.tiltYaw = 0;
+    this.tiltPitch = 0;
     this.pivotDistance = this.pivotDefault;
     this.swayOffset = [0, 0, 0];
+    this.changed();
+  };
+
+  Controls.prototype.setMode = function (mode) {
+    if (mode === this.mode) return;
+    if (mode === "orbit") {
+      // Start orbiting from exactly where the look camera's eye is.
+      var eye = this.camera().eye;
+      this.position = this._clampPosition(eye);
+      this.pivotDistance = this.pivotDefault;
+    }
+    this.mode = mode;
     this.changed();
   };
 
@@ -111,8 +130,16 @@
   };
 
   Controls.prototype.camera = function () {
-    var eye = add(this.position, this.swayOffset, 1);
-    return { eye: eye, target: add(eye, forwardOf(this.yaw, this.pitch), 1) };
+    var yaw = this.yaw + this.tiltYaw;
+    var pitch = clamp(this.pitch + this.tiltPitch, -PITCH_LIMIT, PITCH_LIMIT);
+    var forward = forwardOf(yaw, pitch);
+    var eye = this.position;
+    if (this.mode === "look") {
+      // Eye = neck pivot + rotated offset; zero offset when facing forward.
+      eye = this._clampPosition(add(eye, M.sub(forward, [0, 0, -1]), this.neck));
+    }
+    eye = add(eye, this.swayOffset, 1);
+    return { eye: eye, target: add(eye, forward, 1), yaw: yaw, pitch: pitch };
   };
 
   /* Gentle side-to-side sway until the first interaction, to show the photo is 3D. */
@@ -142,10 +169,17 @@
     return true;
   };
 
-  /* A drag across the full width = ~60 deg of orbit or ~90 deg of head turn. */
+  /* Look mode: the scene follows the finger. Rotation per pixel is the field
+   * of view per pixel, with a little gain so turning all the way round takes
+   * a handful of swipes, not a dozen. A fixed rate overshoots wildly at
+   * narrow fields of view (panoramas, telephoto shots).
+   * Orbit mode: a drag across the full width = ~60 deg. */
+  var LOOK_GAIN = 1.4;
   Controls.prototype._radiansPerPixel = function () {
-    var span = this.mode === "orbit" ? 1.05 : 1.6;
-    return span / Math.max(320, Math.min(this.element.clientWidth, this.element.clientHeight * 1.6));
+    if (this.mode === "look" && this.fovy) {
+      return LOOK_GAIN * this.fovy / Math.max(1, this.element.clientHeight);
+    }
+    return 1.05 / Math.max(320, Math.min(this.element.clientWidth, this.element.clientHeight * 1.6));
   };
 
   Controls.prototype._bind = function () {
@@ -160,8 +194,11 @@
     }
 
     el.addEventListener("pointerdown", function (event) {
-      el.setPointerCapture && el.setPointerCapture(event.pointerId);
+      // Register first: capture can throw (InvalidPointerId) for a pointer
+      // that has already ended, and a lost finger would silently turn a
+      // pinch into a one-finger drag.
       self.pointers[event.pointerId] = { x: event.clientX, y: event.clientY, button: event.button, shift: event.shiftKey };
+      try { el.setPointerCapture(event.pointerId); } catch (e) { /* capture is an optimisation */ }
       self.markInteraction();
       if (points().length === 2) pinch = pinchState();
     });
@@ -219,11 +256,15 @@
 
   /* ---------------- device orientation ("Tilt") ----------------
    * Only offered in a secure context: browsers withhold orientation from
-   * plain-HTTP pages (PDD-REVIEW R2). Tilting translates the camera, like a
-   * 3D photo, rather than turning it, which is what makes depth visible. */
+   * plain-HTTP pages (PDD-REVIEW R2).
+   *   look mode:  a "magic window". Turning the phone turns the view, so you
+   *               look around the world by moving the phone.
+   *   orbit mode: tilting slides the camera, like a 3D photo. */
   Controls.tiltSupported = function () {
     return !!(root.isSecureContext && "DeviceOrientationEvent" in root);
   };
+
+  function wrapDegrees(d) { return ((d + 540) % 360) - 180; }
 
   Controls.prototype.enableTilt = function () {
     var self = this;
@@ -232,13 +273,23 @@
       self._tiltHandler = function (event) {
         if (event.beta === null || event.gamma === null) return;
         var angle = (screen.orientation && screen.orientation.angle) || root.orientation || 0;
-        var x = event.gamma, y = event.beta;
-        if (angle === 90) { x = event.beta; y = -event.gamma; }
-        else if (angle === -90 || angle === 270) { x = -event.beta; y = event.gamma; }
-        if (!base) base = { x: x, y: y };
-        var nx = clamp((x - base.x) / 25, -1, 1), ny = clamp((y - base.y) / 25, -1, 1);
+        // Pitch axis is beta in portrait and gamma in landscape.
+        var pitchAxis = event.beta, sideAxis = event.gamma;
+        if (angle === 90) { pitchAxis = -event.gamma; sideAxis = event.beta; }
+        else if (angle === -90 || angle === 270) { pitchAxis = event.gamma; sideAxis = -event.beta; }
+        var heading = event.alpha === null ? null : event.alpha;
+        if (!base) base = { pitch: pitchAxis, side: sideAxis, heading: heading };
         self.markInteraction();
-        self.swayOffset = [nx * self.half[0], -ny * self.half[1], 0];
+        if (self.mode === "look") {
+          var dHeading = heading === null || base.heading === null ? 0 : wrapDegrees(heading - base.heading);
+          self.tiltYaw = -dHeading * Math.PI / 180;
+          self.tiltPitch = clamp((pitchAxis - base.pitch) * Math.PI / 180, -PITCH_LIMIT, PITCH_LIMIT);
+          self.swayOffset = [0, 0, 0];
+        } else {
+          var nx = clamp((sideAxis - base.side) / 25, -1, 1), ny = clamp((pitchAxis - base.pitch) / 25, -1, 1);
+          self.tiltYaw = self.tiltPitch = 0;
+          self.swayOffset = [nx * self.half[0], -ny * self.half[1], 0];
+        }
         self.changed();
       };
       root.addEventListener("deviceorientation", self._tiltHandler);
@@ -258,6 +309,10 @@
   Controls.prototype.disableTilt = function () {
     if (this._tiltHandler) root.removeEventListener("deviceorientation", this._tiltHandler);
     this._tiltHandler = null;
+    // Keep the direction the phone was pointing as the new drag baseline.
+    this.yaw += this.tiltYaw;
+    this.pitch = clamp(this.pitch + this.tiltPitch, -PITCH_LIMIT, PITCH_LIMIT);
+    this.tiltYaw = this.tiltPitch = 0;
     this.swayOffset = [0, 0, 0];
     this.changed();
   };

@@ -16,13 +16,14 @@ from . import SCHEMA
 from .camera import intrinsics_for
 from .depth import DepthEstimator, load_estimator
 from .environment import (
-    dome_colors,
-    dome_mesh,
+    environment_dome,
+    environment_map,
     extend_frame,
     fit_ground,
     fog_density,
     ground_disc_mesh,
     pad_size,
+    sample_environment,
 )
 from .geometry import (
     make_grid,
@@ -36,7 +37,7 @@ from .geometry import (
 from .gltf import GlbBuilder
 from .ingest import ImageSource, load_source
 from .layers import background_layer, detect_sky, sky_colors
-from .mesh import MeshData, compact, sky_mesh, surface_mesh
+from .mesh import MeshData, grid_triangles, sky_mesh, surface_mesh
 from .profiles import QualityProfile, get_profile, profile_dict
 
 logger = logging.getLogger(__name__)
@@ -140,12 +141,30 @@ def build_world(
     )
 
     pad_y, pad_x = pad_size(height, width, profile.pad_fraction)
+    if intrinsics.max_pad_x() is not None:
+        # A panorama's sides must not be extended past 360°; a full 360° one
+        # gets no side padding at all, because its edges meet.
+        pad_x = min(pad_x, intrinsics.max_pad_x())
     canvas_intrinsics = intrinsics.padded(pad_x, pad_y)
-    pixel_v, pixel_u = np.mgrid[0 : height + 2 * pad_y, 0 : width + 2 * pad_x].astype(np.float32) + 0.5
-    pixel_rays = canvas_intrinsics.rays(pixel_u, pixel_v)
-    pixel_rays /= np.linalg.norm(pixel_rays, axis=-1, keepdims=True)
-    fade = dome_colors(pixel_rays, np.array([0.0, 1.0, 0.0]), zenith, horizon, ground_tone) * 255.0
-    canvas = extend_frame(photo.rgb, normalized, sky, profile.pad_fraction, fade_to=fade)
+    # The 360° surround the viewer sees when looking away from the photo. The
+    # frame's padding fades into exactly this, so the photo's edge meets the
+    # surround without a seam.
+    environment = environment_map(
+        photo.rgb, intrinsics, profile.environment_size, zenith, ground_tone
+    )
+    # Sampled on a quarter-resolution ray grid: the surround is blurry, so
+    # per-pixel rays would cost ~10x more for an identical result.
+    canvas_size = (width + 2 * pad_x, height + 2 * pad_y)
+    coarse_w, coarse_h = max(2, canvas_size[0] // 4), max(2, canvas_size[1] // 4)
+    coarse_v, coarse_u = np.mgrid[0:coarse_h, 0:coarse_w].astype(np.float32)
+    coarse_rays = canvas_intrinsics.rays(
+        (coarse_u + 0.5) * canvas_size[0] / coarse_w, (coarse_v + 0.5) * canvas_size[1] / coarse_h
+    )
+    coarse_rays /= np.linalg.norm(coarse_rays, axis=-1, keepdims=True)
+    fade = cv2.resize(
+        sample_environment(environment, coarse_rays), canvas_size, interpolation=cv2.INTER_LINEAR
+    )
+    canvas = extend_frame(photo.rgb, normalized, sky, (pad_y, pad_x), fade_to=fade)
     grid = make_grid(canvas.rgb.shape[1], canvas.rgb.shape[0], profile.grid_long)
     pixel_disparity = to_scene_disparity(canvas.disparity, profile.far)
     # A 3x3 median at grid resolution removes single-vertex depth spikes
@@ -185,15 +204,16 @@ def build_world(
     if not ground.accepted:
         warnings.append(f"no ground plane extended: {ground.reason}")
     up = ground.normal if ground.accepted else np.array([0.0, 1.0, 0.0])
-    ground_color = ground_tone
     mark("environment")
 
     # -- 5. meshes --------------------------------------------------------
     meshes: list[MeshData] = []
-    dome_positions, dome_rgba, dome_indices = dome_mesh(
-        profile.far * DOME_RADIUS, profile.sky_sphere_segments, up, zenith, horizon, ground_color
+    dome_positions, dome_uvs, dome_indices = environment_dome(
+        profile.far * DOME_RADIUS, profile.sky_sphere_segments
     )
-    meshes.append(MeshData("dome", dome_positions, dome_indices, colors=dome_rgba, fog=False))
+    meshes.append(
+        MeshData("dome", dome_positions, dome_indices, uvs=dome_uvs, texture="environment", fog=False)
+    )
 
     sky_layer = None
     if sky_grid.any():
@@ -206,12 +226,14 @@ def build_world(
         disc_positions, disc_colors, disc_indices = ground_disc_mesh(
             ground,
             profile.far * GROUND_RADIUS,
-            max(24, profile.sky_sphere_segments),
+            # Enough segments for the surround's colours to vary around the disc.
+            max(48, 2 * profile.sky_sphere_segments),
             horizon,
             # Deeper than the photo ground's own depth noise (~2-3% of camera
             # height on real photos), so the disc never pokes through it. The
             # viewer adds a slope-scaled polygon offset on top.
             sink=0.05 * abs(ground.offset),
+            environment=environment,
         )
         meshes.append(MeshData("ground", disc_positions, disc_indices, colors=disc_colors))
 
@@ -233,14 +255,29 @@ def build_world(
     foreground = surface_mesh(
         "foreground", positions, uvs, disparity, ~sky_grid, profile.edge_disparity_jump, texture="photo"
     )
-    if foreground is None:
-        raise RuntimeError("the depth map produced no foreground surface")
-    meshes.append(foreground)
+    candidates = int(
+        np.count_nonzero((~sky_grid).reshape(-1)[grid_triangles(grid.height, grid.width)].all(axis=1))
+    )
+    if foreground is None and sky_layer is None:
+        # Every image must produce a world. If the depth map left nothing
+        # (pathological input: pure noise, a uniform frame), fall back to the
+        # photo as one uncut surface rather than failing.
+        warnings.append("depth gave no coherent surface; the photo is shown uncut")
+        foreground = surface_mesh(
+            "foreground", positions, uvs, disparity, np.ones_like(sky_grid), np.inf, texture="photo"
+        )
+        candidates = foreground.triangle_count
+    if foreground is not None:
+        meshes.append(foreground)
+    elif sky_layer is not None:
+        warnings.append("the photo is all sky; it is shown on the sky sphere with no foreground")
     mark("mesh")
 
     # -- 6. export --------------------------------------------------------
     textures: dict[str, tuple[bytes, list[int]]] = {
-        "photo": _encode_jpeg(canvas.rgb, profile.texture_long_side, profile.jpeg_quality)
+        "photo": _encode_jpeg(canvas.rgb, profile.texture_long_side, profile.jpeg_quality),
+        # Blurry by construction, so a lower JPEG quality costs nothing visible.
+        "environment": _encode_jpeg(environment, max(profile.environment_size), 80),
     }
     if background_mesh:
         # Built at half resolution (layers.background_layer): the layer is
@@ -286,6 +323,15 @@ def build_world(
             },
         },
         "layers": {mesh.name: mesh.stats() for mesh in meshes},
+        "grid": [grid.width, grid.height],
+        "quality": {
+            # Share of non-sky grid triangles kept after occlusion cutting. Low
+            # values mean a torn, sliver-heavy surface.
+            "foreground_coverage": round(
+                (foreground.triangle_count if foreground else 0) / max(1, candidates), 4
+            ),
+            "cut_vertices_fraction": round(float(near.mean()), 4),
+        },
         "textures": {key: {"size": size, "bytes": len(data)} for key, (data, size) in textures.items()},
         "timings_ms": timings,
         "warnings": warnings,

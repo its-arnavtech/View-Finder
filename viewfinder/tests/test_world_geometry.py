@@ -43,10 +43,17 @@ def test_grid_matches_profile_long_side_and_aspect():
     assert 0 < uv.min() and uv.max() < 1
 
 
-def test_mobile_profile_stays_within_16_bit_indices():
+@pytest.mark.parametrize("size", [(4000, 4000), (2048, 256), (300, 1800), (1270, 952), (64, 48)])
+def test_mobile_profile_stays_within_16_bit_indices(size):
     mobile = get_profile("mobile")
-    grid = make_grid(4000, 4000, mobile.grid_long)  # square is the worst case
+    grid = make_grid(*size, mobile.grid_long)
     assert grid.width * grid.height <= 0xFFFF
+
+
+def test_panorama_grid_keeps_rows():
+    grid = make_grid(2048, 256, 160)
+    assert grid.height >= 40  # not a 20-row sliver
+    assert grid.width <= 400
 
 
 def test_unknown_profile_is_rejected():

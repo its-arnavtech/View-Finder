@@ -12,6 +12,7 @@ from viewfinder.world.environment import (
 )
 from viewfinder.world.layers import (
     background_layer,
+    background_sources,
     detect_sky,
     occluder_pixels,
     propagate_background,
@@ -55,15 +56,30 @@ def test_occluders_are_only_the_near_side():
 
 
 def test_background_colour_flows_from_the_far_side():
-    rgb = np.zeros((20, 20, 3), np.uint8)
+    rgb = np.zeros((20, 40, 3), np.uint8)
     rgb[:, :10] = (0, 200, 0)  # far background, left
-    rgb[:, 10:] = (200, 0, 0)  # near box, right
-    disparity = np.where(np.arange(20)[None, :] < 10, 0.1, 0.9).astype(np.float32) * np.ones((20, 1))
-    unknown = np.zeros((20, 20), bool)
-    unknown[:, 10:14] = True
-    filled = propagate_background(rgb, disparity, unknown, max_steps=10, margin=0.05)
+    rgb[:, 10:] = (200, 0, 0)  # near box, right (wide: it has a deep interior)
+    disparity = np.where(np.arange(40)[None, :] < 10, 0.1, 0.9).astype(np.float32) * np.ones((20, 1))
+    unknown = occluder_pixels(disparity, radius=4, jump=0.05)
+    sources = background_sources(disparity, radius=4, jump=0.05) & ~unknown
+    assert unknown[:, 10:14].all()
+    assert not sources[:, 10:18].any()  # the occluder's rim never donates colour
+    filled = propagate_background(rgb, unknown, sources)
     assert (filled[:, 10:14, 1] == 200).all() and (filled[:, 10:14, 0] == 0).all()
-    assert (filled[:, 14:, 0] == 200).all()  # untouched beyond the region
+    assert (filled[:, 20:, 0] == 200).all()  # interior untouched
+
+
+def test_fill_copies_the_nearest_source_colour():
+    """Pins the raster-order label convention of distanceTransformWithLabels."""
+    rgb = np.zeros((9, 9, 3), np.uint8)
+    sources = np.zeros((9, 9), bool)
+    for (y, x), color in {(0, 0): 10, (0, 8): 20, (8, 0): 30, (8, 8): 40}.items():
+        sources[y, x] = True
+        rgb[y, x] = color
+    unknown = ~sources
+    filled = propagate_background(rgb, unknown, sources)
+    assert filled[1, 1, 0] == 10 and filled[1, 7, 0] == 20
+    assert filled[7, 1, 0] == 30 and filled[7, 7, 0] == 40
 
 
 def test_background_layer_sits_behind_the_occluder():
@@ -95,7 +111,7 @@ def test_frame_extension_continues_planes_and_fades_to_the_dome():
 
     rgb = np.full((height, width, 3), 120, np.uint8)
     fade = np.zeros((height + 20, width + 26, 3), np.float32)  # pads: 10 rows, 13 columns
-    canvas = extend_frame(rgb, plane, np.zeros_like(plane, bool), 10 / 60, fade_to=fade)
+    canvas = extend_frame(rgb, plane, np.zeros_like(plane, bool), (10, 13), fade_to=fade)
     assert canvas.rgb.shape[:2] == (80, 106)
     assert canvas.original.sum() == height * width
     assert canvas.rgb[0, 0].mean() < 30  # outer corner faded toward the (black) dome
@@ -162,6 +178,48 @@ def test_ground_disc_is_sunk_below_the_plane():
     heights = positions @ plane.normal + plane.offset
     np.testing.assert_allclose(heights, -0.075, atol=1e-4)
     assert indices.max() < len(positions)
+
+
+def test_environment_map_reproduces_the_photo_ahead_and_wraps_seamlessly():
+    from viewfinder.world.camera import intrinsics_for
+    from viewfinder.world.environment import environment_map, sample_environment
+
+    rgb = np.zeros((300, 400, 3), np.uint8)
+    rgb[:, :200] = (250, 0, 0)  # left half red
+    rgb[:, 200:] = (0, 0, 250)  # right half blue
+    camera = intrinsics_for(400, 300)
+    env = environment_map(rgb, camera, (512, 256), np.array([0.5, 0.6, 0.9]), np.array([0.3, 0.3, 0.2]))
+    ahead_left = sample_environment(env, np.array([[[-0.15, 0.0, -1.0]]]) / np.linalg.norm([-0.15, 0, -1]))
+    ahead_right = sample_environment(env, np.array([[[0.15, 0.0, -1.0]]]) / np.linalg.norm([0.15, 0, -1]))
+    assert ahead_left[0, 0, 0] > 150 and ahead_right[0, 0, 2] > 150
+    # Behind the viewer the two continuations meet: the seam columns match.
+    assert np.abs(env[:, 0].astype(int) - env[:, -1].astype(int)).max() < 12
+    # Straight up and down fade to the supplied zenith / ground tones.
+    np.testing.assert_allclose(env[0].mean(axis=0), [127, 153, 229], atol=30)
+    np.testing.assert_allclose(env[-1].mean(axis=0), [76, 76, 51], atol=30)
+
+
+def test_full_panorama_environment_is_the_panorama_all_round():
+    from viewfinder.world.camera import intrinsics_for
+    from viewfinder.world.environment import environment_map
+
+    rgb = np.zeros((250, 2000, 3), np.uint8)
+    rgb[:, :, 1] = np.linspace(0, 255, 2000).astype(np.uint8)[None, :]
+    camera = intrinsics_for(2000, 250)
+    assert camera.wraps
+    env = environment_map(rgb, camera, (512, 256), np.zeros(3), np.zeros(3))
+    horizon = env[128, :, 1].astype(float)
+    assert np.isfinite(horizon).all()
+    # Green rises with azimuth all the way round (no mirrored back arc).
+    assert np.corrcoef(np.arange(512)[40:-40], horizon[40:-40])[0, 1] > 0.95
+
+
+def test_ground_disc_takes_its_colour_from_the_surround():
+    plane = fit_ground(_plane_points([0, 1, 0], 1.5), np.full((600, 3), 0.3))
+    env = np.zeros((64, 128, 3), np.uint8)
+    env[30:] = (10, 200, 10)  # everything from just above the horizon down is green
+    _, colors, _ = ground_disc_mesh(plane, 50.0, 24, np.ones(3), sink=0.05, environment=env)
+    assert (colors[:, 1] > 150).all()
 
 
 def test_fog_density_hits_target_at_far():

@@ -40,6 +40,10 @@
     "}",
   ].join("\n");
 
+  // ?webgl=1 forces the WebGL1 path that older phones fall back to, for
+  // testing. Read at load, before the app rewrites the address bar.
+  var FORCE_WEBGL1 = /[?&]webgl=1\b/.test(root.location.search);
+
   // Layers drawn behind everything else, without writing depth.
   var BACKDROP = { dome: 0, sky: 1 };
 
@@ -89,7 +93,7 @@
 
   Renderer.prototype._initContext = function () {
     var attributes = { antialias: true, alpha: false, powerPreference: "default", preserveDrawingBuffer: false };
-    var gl = this.canvas.getContext("webgl2", attributes);
+    var gl = FORCE_WEBGL1 ? null : this.canvas.getContext("webgl2", attributes);
     this.webgl2 = !!gl;
     if (!gl) gl = this.canvas.getContext("webgl", attributes) || this.canvas.getContext("experimental-webgl", attributes);
     if (!gl) throw new Error("This browser cannot show 3D (WebGL is unavailable or disabled).");
@@ -204,6 +208,7 @@
       });
       draws.sort(function (a, b) { return a.order - b.order; });
       self.gpu = { draws: draws };
+      self.triangles = draws.reduce(function (sum, draw) { return sum + draw.count / 3; }, 0);
     });
   };
 

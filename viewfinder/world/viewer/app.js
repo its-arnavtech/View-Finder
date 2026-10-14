@@ -9,7 +9,11 @@
   var doc = root.document;
   var $ = function (id) { return doc.getElementById(id); };
   var TOKEN_KEY = "viewfinder.world.token";
-  var MAX_UPLOAD_SIDE = 2048;
+  // Slightly above each profile's working resolution: anything larger is
+  // discarded by the engine anyway, so sending it only costs mobile data.
+  var UPLOAD_SIDE = { mobile: 1280, desktop: 2048, high: 2560 };
+  // Adaptive resolution: frame-time targets (ms) for stepping the pixel ratio.
+  var SLOW_FRAME_MS = 28, FAST_FRAME_MS = 15, MIN_PIXEL_RATIO = 1;
   var STAGE_LABELS = {
     queued: "Waiting for the engine…",
     start: "Reading the photo…",
@@ -33,7 +37,14 @@
     frameRequested: false,
     swayStart: 0,
     lastTick: 0,
+    frameSamples: [],
+    pixelRatioCeiling: 2,
+    debug: /[?&]debug=1\b/.test(root.location.search),
+    stats: { frames: 0, fps: 0, pixelRatio: 0, triangles: 0, drawCalls: 0, lastFpsTime: 0, lastFpsFrames: 0 },
   };
+  // Read by automated checks and the ?debug=1 overlay.
+  root.__worldStats = state.stats;
+  root.__worldViewer = state;
 
   /* ---------------- small storage helpers (may throw in private mode) ---------------- */
   function storeGet(key) { try { return root.localStorage.getItem(key); } catch (e) { return null; } }
@@ -86,13 +97,14 @@
   /* Downscale + re-encode on the phone: ~10x smaller uploads, and HEIC becomes JPEG
    * wherever the browser can decode it. <img> applies EXIF orientation in every
    * target browser, so the canvas receives an upright picture (PDD-REVIEW R8). */
-  function prepareUpload(file) {
+  function prepareUpload(file, quality) {
+    var maxSide = UPLOAD_SIDE[quality] || UPLOAD_SIDE.desktop;
     return new Promise(function (resolve) {
       var url = URL.createObjectURL(file);
       var image = new Image();
       image.onload = function () {
         try {
-          var scale = Math.min(1, MAX_UPLOAD_SIDE / Math.max(image.naturalWidth, image.naturalHeight));
+          var scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
           var canvas = doc.createElement("canvas");
           canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
           canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
@@ -126,7 +138,7 @@
     showError("");
     setBusy("Preparing photo…", 0.02);
     var quality = $("quality").value === "auto" ? (isMobile() ? "mobile" : "desktop") : $("quality").value;
-    return prepareUpload(file)
+    return prepareUpload(file, quality)
       .then(function (blob) {
         setBusy("Uploading…", 0.06);
         return api("api/worlds?quality=" + encodeURIComponent(quality), {
@@ -147,7 +159,11 @@
       .then(function (r) { return r.arrayBuffer(); })
       .then(function (bytes) {
         state.worldId = worldId;
-        try { root.history.replaceState(null, "", "?world=" + worldId); } catch (e) { /* ignore */ }
+        try {
+          var params = new URLSearchParams(root.location.search);
+          params.set("world", worldId); // keep other flags (debug, webgl)
+          root.history.replaceState(null, "", "?" + params.toString());
+        } catch (e) { /* ignore */ }
         return showWorld(bytes);
       });
   }
@@ -157,6 +173,11 @@
     var camera = manifest.camera;
     var aspect = Math.max(0.2, state.renderer.canvas.clientWidth / Math.max(1, state.renderer.canvas.clientHeight));
     var vfov = camera.vfov_deg * Math.PI / 180;
+    if (camera.projection === "cylindrical") {
+      // A panorama is explored by turning, not seen whole: show a natural
+      // field of view and let the user look along it.
+      return Math.min(Math.max(vfov * 1.25, 50 * Math.PI / 180), 80 * Math.PI / 180);
+    }
     var hfov = camera.hfov_deg * Math.PI / 180;
     // Narrow (portrait) screens: widen vertically so more of the photo's
     // width fits, but never past the padded photo's own vertical extent;
@@ -173,22 +194,89 @@
     root.requestAnimationFrame(frame);
   }
 
+  /* Adaptive resolution: while frames are being drawn back-to-back, step the
+   * pixel ratio down if they are slow (weak phone GPUs) and back up when
+   * there is headroom. Only continuous frames count; the gaps of render-on-
+   * demand idling would read as slowness. */
+  function adaptResolution(frameMs) {
+    var samples = state.frameSamples;
+    samples.push(frameMs);
+    if (samples.length < 24) return;
+    samples.sort(function (a, b) { return a - b; });
+    var typical = samples[samples.length >> 1];
+    state.frameSamples = [];
+    state.stats.frameMs = Math.round(typical * 10) / 10;
+    var renderer = state.renderer;
+    // Slowness is judged against the device's own idle frame cadence, not
+    // a fixed 60 Hz: iOS Low Power Mode caps pages at 30 fps and some
+    // webviews throttle further, and neither means the GPU is struggling.
+    var cadence = state.cadenceMs || 16.7;
+    var slow = Math.max(SLOW_FRAME_MS, cadence * 1.5), fast = Math.max(FAST_FRAME_MS, cadence * 1.15);
+    if (typical > slow && renderer.maxPixelRatio > MIN_PIXEL_RATIO) {
+      renderer.maxPixelRatio = Math.max(MIN_PIXEL_RATIO, renderer.maxPixelRatio - 0.25);
+    } else if (typical < fast && renderer.maxPixelRatio < state.pixelRatioCeiling) {
+      renderer.maxPixelRatio = Math.min(state.pixelRatioCeiling, renderer.maxPixelRatio + 0.25);
+    }
+  }
+
+  /* Median interval of ~20 empty animation frames: the display/browser cap. */
+  function measureCadence() {
+    var stamps = [];
+    function tick(time) {
+      stamps.push(time);
+      if (stamps.length < 21) { root.requestAnimationFrame(tick); return; }
+      var gaps = stamps.slice(1).map(function (t, i) { return t - stamps[i]; }).sort(function (a, b) { return a - b; });
+      state.cadenceMs = gaps[gaps.length >> 1];
+      state.stats.cadenceMs = Math.round(state.cadenceMs * 10) / 10;
+    }
+    root.requestAnimationFrame(tick);
+  }
+
+  function updateStats(time) {
+    var s = state.stats, renderer = state.renderer;
+    s.frames += 1;
+    s.pixelRatio = renderer.canvas.width / Math.max(1, renderer.canvas.clientWidth);
+    s.triangles = renderer.triangles;
+    s.drawCalls = renderer.gpu ? renderer.gpu.draws.length : 0;
+    if (time - s.lastFpsTime >= 500 || s.frames === 1) {
+      s.fps = Math.round((s.frames - s.lastFpsFrames) * 1000 / Math.max(1, time - s.lastFpsTime));
+      s.lastFpsTime = time;
+      s.lastFpsFrames = s.frames;
+      if (state.debug) {
+        $("debug").hidden = false;
+        // Frame time while moving; render-on-demand idles between interactions.
+        $("debug").textContent = (s.frameMs ? s.frameMs + " ms/frame" : "–") +
+          " (cap " + Math.round(1000 / (state.cadenceMs || 16.7)) + " fps) · " +
+          s.pixelRatio.toFixed(2) + "x · " +
+          Math.round(s.triangles / 1000) + "k tris · " + s.drawCalls + " draws · " +
+          renderer.canvas.width + "×" + renderer.canvas.height + (renderer.webgl2 ? " · WebGL2" : " · WebGL1");
+      }
+    }
+  }
+
   function frame(time) {
     state.frameRequested = false;
     if (!state.renderer || !state.controls) return;
     var dt = state.lastTick ? Math.min(0.1, (time - state.lastTick) / 1000) : 0;
+    if (state.lastTick) adaptResolution(time - state.lastTick);
     state.lastTick = time;
     var animating = state.controls.sway((time - state.swayStart) / 1000);
     animating = state.controls.tick(dt) || animating;
     var manifest = state.renderer.scene.manifest;
     var view = state.controls.camera();
+    var fovy = fovFor(manifest);
+    state.controls.fovy = fovy; // drag rotation tracks the finger at this field of view
     state.renderer.draw({
       eye: view.eye,
       target: view.target,
-      fovy: fovFor(manifest),
+      fovy: fovy,
       near: manifest.camera.near_clip,
       far: manifest.camera.far_clip,
     });
+    state.stats.eye = view.eye.map(function (v) { return Math.round(v * 1000) / 1000; });
+    state.stats.yaw = Math.round(view.yaw * 1000) / 1000;
+    state.stats.pitch = Math.round(view.pitch * 1000) / 1000;
+    updateStats(time);
     // Render on demand: keep going only while something is moving (NFR9).
     if (animating || state.dirty) { state.dirty = false; requestFrame(); }
     else state.lastTick = 0;
@@ -202,7 +290,7 @@
     var canvas = $("world");
     if (!state.renderer) {
       state.renderer = new root.WorldRenderer(canvas, {
-        maxPixelRatio: isMobile() ? 1.5 : 2,
+        maxPixelRatio: state.pixelRatioCeiling = isMobile() ? 1.5 : 2,
         onLost: function () { setBusy("Restoring the view…", 0.5); },
         onRestored: function () { show("viewer"); invalidate(); },
       });
@@ -219,8 +307,8 @@
       show("viewer");
       $("hint").hidden = false;
       $("hint").textContent = isMobile()
-        ? "Drag to explore · Pinch to move · Double-tap to reset"
-        : "Drag to explore · Scroll to move · Right-drag to slide · WASD to fly";
+        ? "Drag to look around · Pinch to move · Double-tap to reset"
+        : "Drag to look around · Scroll to move · Right-drag to slide · WASD to walk";
       setTimeout(function () { $("hint").hidden = true; }, 6000);
       updateToolbar();
       invalidate();
@@ -230,8 +318,9 @@
   /* ---------------- toolbar ---------------- */
   function updateToolbar() {
     var c = state.controls;
-    $("btn-mode").textContent = c.mode === "orbit" ? "Orbit" : "Fly";
-    $("btn-mode").setAttribute("aria-pressed", c.mode === "fly");
+    // The button names the *other* mode it switches to.
+    $("btn-mode").textContent = c.mode === "look" ? "Orbit" : "Look";
+    $("btn-mode").setAttribute("aria-label", c.mode === "look" ? "Switch to orbit mode" : "Switch to look-around mode");
     $("btn-roam").setAttribute("aria-pressed", c.freeRoam);
     $("btn-tilt").hidden = !root.WorldControls.tiltSupported();
     $("btn-new").hidden = state.standalone;
@@ -261,7 +350,7 @@
     });
     $("btn-reset").addEventListener("click", function () { state.controls.reset(); });
     $("btn-mode").addEventListener("click", function () {
-      state.controls.mode = state.controls.mode === "orbit" ? "fly" : "orbit";
+      state.controls.setMode(state.controls.mode === "look" ? "orbit" : "look");
       updateToolbar();
     });
     $("btn-roam").addEventListener("click", function () {
@@ -289,6 +378,7 @@
 
   function start() {
     bindUi();
+    measureCadence(); // runs while the world downloads
     if (state.standalone) {
       setBusy("Opening world…", 0.5);
       showWorld(base64ToBuffer(root.__VIEWFINDER_WORLD__)).catch(function (e) { showError(e.message); });

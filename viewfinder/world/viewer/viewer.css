@@ -165,6 +165,19 @@ select {
   backdrop-filter: blur(10px);
 }
 
+.debug {
+  position: fixed;
+  left: 8px;
+  bottom: calc(118px + env(safe-area-inset-bottom));
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font: 12px/1.3 ui-monospace, SFMono-Regular, Consolas, monospace;
+  pointer-events: none;
+}
+.debug[hidden] { display: none; }
+
 @media (max-width: 420px) {
   .toolbar { gap: 6px; padding-left: 8px; padding-right: 8px; }
   .toolbar button { padding: 0 11px; font-size: 0.86rem; }

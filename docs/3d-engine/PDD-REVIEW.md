@@ -107,3 +107,54 @@ one is fixed, and the ones that could regress have a test.
 - **Standalone HTML** opens and renders with no server and no network.
 - **Not verified on physical phones.** Gyro and real iOS/Android GPUs remain
   to be checked. Tilt cannot be exercised in the desktop browser pane.
+
+## 6. Robustness pass: any image, look-around, phones
+
+Requirement restated by the user: *"it should create a 3D world for any
+given image; users must be able to look around with mouse/touch; it must be
+optimised for phones."*
+
+### Stress results (`benchmark-harness/world_stress.py`, real depth model)
+
+| Profile | Inputs | Worlds | Expected rejections | Failures | Build median / p95 / max | GLB median (max) |
+|---|---|---|---|---|---|---|
+| mobile | 120 travel + 40 street + 19 edge = 179 | 177 | 2 | **0** | 0.65 / 0.76 / 1.16 s | 0.93 MB (1.34 MB) |
+| desktop | 25 + 10 + 17 edge = 52 | 52 | 0 | **0** | 1.5 s median | 3.4 MB |
+| high | 25 + 10 + 17 edge = 52 | 52 | 0 | **0** | 1.7 s median | 10.1 MB |
+
+The mobile run had a median foreground coverage of 0.967 (share of the
+surface kept after occlusion cutting); the only world below 0.6 was the
+48×36 thumbnail. A ground plane was accepted for 50 % of photos and safely
+declined for the rest.
+
+### Findings
+
+| # | Found by | Finding | Fix |
+|---|---|---|---|
+| C1 | Code review before the stress run | An all-sky photo leaves no foreground surface, and the pipeline raised. That breaks "any image". | A world with only the sky layer is valid. If neither layer exists, the photo is shown as one uncut surface. Every input that decodes yields a world. |
+| C2 | Edge-case generator | A 16-bit PNG converted to RGB clips at 255 in Pillow, so it came out almost white. | High-bit modes (`I;16*`, `I`, `F`) are percentile-stretched to 8 bits first. |
+| C3 | Browser, Bermuda photo | Looking away from the photo showed a flat gradient dome. There was no "world" to look around in. | A 360° environment panorama is synthesised from the photo (architecture §3.6), and the padding and ground disc are coloured from it. |
+| C4 | Profiling the stress run | The new layers stage took a median of 2.7 s. The background colour flood (1.2 s) and two large-sigma blurs (0.6 s, 0.4 s) dominated. | A labelled distance transform replaces the flood (1175 → 23 ms), and large blurs run at reduced resolution. The median build is now **0.65 s, 4.2× faster**. |
+| C5 | Browser, phone viewport | The default drag orbited a point, which is not "look around". | **Look** (360° turn with a neck pivot for parallax) is now the default and Orbit is a toggle. Tilt in Look mode is a magic window. |
+| C6 | Browser, 8:1 panorama | Every image was treated as a 26 mm pinhole, so the panorama was squeezed into a 10°-tall sliver, and one swipe overshot the whole photo. | A cylindrical camera for images ≥ 2.8:1 (up to a 360° wrap), area-based working and mesh budgets, and drag rotation proportional to the field of view so the scene tracks the finger. |
+| C7 | Browser, street-view photo | Turning sideways showed a seam between the photo's ground and the flat-coloured ground disc. | The disc's vertex colours are sampled from the environment panorama. |
+| C8 | Unit test | `cv2.remap(BORDER_WRAP)` wraps vertically too. Looking straight down blended in the zenith colour across the pole. | Rows are clamped and only azimuth wraps. |
+| C9 | Browser, measuring frame rate | The pane's own `requestAnimationFrame` runs at 16 fps with an empty loop. Adaptive resolution read that as a slow GPU. iOS Low Power Mode (30 fps cap) would trip it the same way. | The device's idle cadence is measured at start-up, and slowness is judged relative to it. |
+| C10 | Synthetic touch test | `setPointerCapture` threw for a pointer ID the browser considered inactive, *before* the pointer was registered. The second finger was lost, so pinch became a one-finger drag. | The pointer is registered first and capture is guarded. Pinch now moves +0.68 / −0.84 along the view. |
+| C11 | Browser, `?webgl=1` | The WebGL1 test flag (and `?debug=1`) were dropped when the app rewrote the URL to `?world=<id>`. | Flags are read at load, and the rewrite preserves other parameters. The WebGL1 path was verified rendering a 171k-triangle `uint32` world. |
+
+### Interaction verified in the browser (375×812 phone viewport)
+
+These were dispatched as real multi-pointer touch events, with assertions
+on camera state:
+
+- One-finger drag turns right/left and up/down.
+- Two-finger pinch moves forward and back along the view.
+- Two-finger drag slides the camera.
+- Double-tap resets.
+- The hint dismisses on first touch, and `touch-action: none` is set on the
+  canvas.
+
+Nine different worlds (portrait, city, street view, sky-only, synthetic and
+real-photo panoramas, landscape, a desktop-profile world on WebGL1) loaded
+with no console errors.

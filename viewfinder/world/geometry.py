@@ -81,14 +81,18 @@ class Grid:
 
 
 def make_grid(image_width: int, image_height: int, grid_long: int) -> Grid:
-    if image_width >= image_height:
-        width = grid_long
-        height = max(2, round(grid_long * image_height / image_width))
-    else:
-        height = grid_long
-        width = max(2, round(grid_long * image_width / image_height))
-    width = min(width, image_width)
-    height = min(height, image_height)
+    """Vertex grid with a fixed *vertex budget* (a 4:3 grid of ``grid_long``).
+
+    Budgeting by count rather than long side keeps panoramas from
+    collapsing to a few rows, and keeps the mobile profile's grid within
+    16-bit indices whatever the aspect ratio.
+    """
+    budget = grid_long * round(grid_long * 0.75)
+    aspect = image_width / image_height
+    width = min(round((budget * aspect) ** 0.5), round(2.5 * grid_long))
+    height = max(2, round(budget / max(width, 1)))
+    width = max(2, min(width, round(2.5 * grid_long), image_width))
+    height = min(height, round(2.5 * grid_long), image_height)
     xs = np.linspace(0.5, image_width - 0.5, width, dtype=np.float64)
     ys = np.linspace(0.5, image_height - 0.5, height, dtype=np.float64)
     u, v = np.meshgrid(xs, ys)

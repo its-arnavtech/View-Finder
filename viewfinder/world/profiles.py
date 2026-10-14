@@ -37,6 +37,9 @@ class QualityProfile:
     # fraction of the working image's long side.
     occlusion_dilation_fraction: float
     sky_sphere_segments: int
+    # Equirectangular surround texture (width, height) shown when the viewer
+    # looks away from the photo. Power-of-two so WebGL1 phones can mipmap it.
+    environment_size: tuple[int, int] = (1024, 512)
 
 
 PROFILES: dict[str, QualityProfile] = {
@@ -63,6 +66,7 @@ PROFILES: dict[str, QualityProfile] = {
         edge_disparity_jump=0.03,
         occlusion_dilation_fraction=0.025,
         sky_sphere_segments=32,
+        environment_size=(2048, 1024),
     ),
     "high": QualityProfile(
         name="high",
@@ -75,6 +79,7 @@ PROFILES: dict[str, QualityProfile] = {
         edge_disparity_jump=0.02,
         occlusion_dilation_fraction=0.025,
         sky_sphere_segments=48,
+        environment_size=(2048, 1024),
     ),
 }
 

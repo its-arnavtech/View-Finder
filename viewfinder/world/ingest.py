@@ -23,6 +23,8 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 MAX_SOURCE_PIXELS = 100_000_000
 MIN_SOURCE_SIDE = 32
 
+_HIGH_BIT_MODES = {"I;16", "I;16B", "I;16L", "I;16N", "I", "F"}
+
 _EXIF_IFD = 0x8769
 _FOCAL_35MM = 0xA405
 
@@ -91,12 +93,23 @@ def _open(source: ImageSource) -> tuple[Image.Image, str]:
 
 
 def load_source(source: ImageSource, working_long_side: int) -> SourceImage:
-    """Return the upright RGB photo resized so its long side is at most ``working_long_side``."""
+    """Return the upright RGB photo, downsized to the working pixel budget.
+
+    The budget is the area of a 4:3 frame whose long side is
+    ``working_long_side``; images are never upscaled.
+    """
     image, name = _open(source)
     focal = _focal_35mm(image)
     if getattr(image, "n_frames", 1) > 1:
         image.seek(0)
     image = ImageOps.exif_transpose(image)
+    if image.mode in _HIGH_BIT_MODES:
+        # Pillow's I;16/I/F -> RGB conversion clips at 255 instead of scaling,
+        # which turns an ordinary 16-bit PNG nearly white. Stretch to 8 bits.
+        values = np.asarray(image, dtype=np.float32)
+        low, high = np.percentile(values, [0.5, 99.5])
+        scaled = np.clip((values - low) / max(high - low, 1e-6) * 255.0, 0, 255)
+        image = Image.fromarray(scaled.astype(np.uint8), mode="L")
     if image.mode != "RGB":
         # Composite transparency over white rather than letting it go black.
         if image.mode in ("RGBA", "LA", "PA") or "transparency" in image.info:
@@ -110,7 +123,14 @@ def load_source(source: ImageSource, working_long_side: int) -> SourceImage:
         raise ImageInputError(
             f"Image is {source_width}x{source_height}; at least {MIN_SOURCE_SIDE}px per side is needed"
         )
-    scale = working_long_side / max(source_width, source_height)
+    # Budget by *area* (that of a 4:3 frame at the working long side), so a
+    # panorama keeps a usable height instead of collapsing to a sliver, and
+    # cap the long side so textures stay within phone GPU limits.
+    budget = working_long_side * working_long_side * 0.75
+    scale = min(
+        (budget / (source_width * source_height)) ** 0.5,
+        2.0 * working_long_side / max(source_width, source_height),
+    )
     if scale < 1.0:
         size = (max(1, round(source_width * scale)), max(1, round(source_height * scale)))
         image = image.resize(size, Image.Resampling.LANCZOS, reducing_gap=3.0)

@@ -119,6 +119,14 @@ field of view comes from the EXIF 35 mm focal length when present
 FOV only stretches depth uniformly, which looks natural, so a sensible default
 is good enough.
 
+**Panoramas.** Images at least 2.8:1 use a **cylindrical** model instead.
+Columns are linear in azimuth and rows follow `tan(elevation)`, with a ~60°
+vertical field and the horizontal span set by the aspect ratio, up to a full
+360°. A wrapped panorama gets no side padding, because its edges meet. EXIF
+focal lengths are ignored for panoramas, since they describe the source
+frames, not the stitch. The working-size and mesh budgets are set by
+**area** (a 4:3 frame), not long side, so panoramas keep a usable height.
+
 ### 3.4 Depth conditioning
 
 1. Robustly normalise disparity to `[0, 1]` in **two passes** (review R1).
@@ -178,10 +186,21 @@ is good enough.
 - **Sky layer.** Sky pixels are not given (meaningless) depth. They are placed
   on a sphere of radius `R_sky` along their camera rays, which keeps the real
   clouds with no false parallax.
-- **Sky dome.** A low-poly sphere with per-vertex colours interpolated from
-  the zenith colour (mean of the top sky rows) to the horizon colour (mean of
-  the lowest sky rows, or the image's top band when there is no sky). It
-  covers every direction the photo never saw.
+- **Environment panorama (the 360° surround).** An equirectangular texture
+  (1024×512 on mobile, a power of two so WebGL1 can mipmap it) on the dome.
+  It covers every direction the photo never saw, so looking around always
+  shows a world:
+  - Straight ahead it reproduces the photo.
+  - Past each side edge the photo is mirrored outward and blurred more the
+    farther you turn.
+  - Behind the viewer, the right-edge and left-edge continuations
+    cross-fade, so the wrap has no seam.
+  - Above and below the frame it fades into the photo's zenith and ground
+    tones.
+
+  The frame padding and the ground disc take their colours from this same
+  panorama, so all three agree. It is an ambient continuation, deliberately
+  blurred, not a claim about what was there.
 - **Ground plane.** RANSAC plane fit on 3D points from the bottom ~38 % of the
   non-sky image. Three gates must all pass: an inlier ratio of at least 45 %,
   a normal within 40° of camera-up, and **at most 5 % of the whole scene below
@@ -244,6 +263,11 @@ shader.
   is moving, an animation runs, or the gyro is active. Rendering stops when
   the tab is hidden. `devicePixelRatio` is capped (1.5 on mobile, 2 on
   desktop).
+- **Adaptive resolution.** While frames are drawn back to back, the pixel
+  ratio steps down 0.25 when the median frame time exceeds 1.5× the device's
+  own idle frame cadence, and steps back up with headroom. The cadence is
+  measured at start-up, so a 30 fps cap (iOS Low Power Mode, throttled
+  webviews) is not mistaken for a slow GPU.
 - **Robustness.** It handles `webglcontextlost`/`restored` (common on iOS when
   backgrounding) by rebuilding GPU resources from the parsed GLB kept in
   memory.
@@ -251,13 +275,13 @@ shader.
 
   | Input | Action |
   |---|---|
-  | 1-finger drag / mouse drag | **Orbit** (default): circle a pivot in front of the camera, which gives real parallax · **Fly**: turn the head in place |
+  | 1-finger drag / mouse drag | **Look** (default): turn the view a full 360°. Rotation per pixel equals the field of view per pixel (× 1.4), so the scene tracks the finger at any zoom. The eye sits in front of a "neck" pivot, which adds natural parallax · **Orbit**: circle a pivot in front of the camera for maximum depth |
   | pinch / mouse wheel | move forward / back |
   | 2-finger drag / right- or shift-drag | strafe / rise |
   | double-tap / `R` | reset to the photo's viewpoint |
   | WASD + QE / arrows | fly (desktop) |
-  | Tilt toggle | device-orientation parallax: tilting the phone slides the camera, like a 3D photo (iOS permission prompt from the tap) |
-  | Orbit / Fly toggle | switches what a 1-finger drag does |
+  | Tilt toggle | Look mode: a "magic window" (turn the phone to look around). Orbit mode: tilting slides the camera like a 3D photo. iOS asks permission on the tap |
+  | Look / Orbit toggle | switches what a 1-finger drag does |
 
   Movement is softly clamped to the manifest's navigation bounds, the region
   where the reconstruction holds up. The bounds are

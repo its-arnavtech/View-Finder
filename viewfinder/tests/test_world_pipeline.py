@@ -38,7 +38,7 @@ def test_world_has_every_layer_and_a_valid_glb(mobile_world):
     names = [mesh["name"] for mesh in glb.document["meshes"]]
     assert names == ["dome", "sky", "ground", "background", "foreground"]
     assert glb.extras["viewfinder_world"]["schema"] == SCHEMA
-    assert len(glb.document["images"]) == 2  # photo + background textures
+    assert len(glb.document["images"]) == 3  # photo, environment and background textures
     assert Image.open(io.BytesIO(glb.image_bytes(0))).format == "JPEG"
 
 
@@ -91,6 +91,39 @@ def test_heuristic_estimator_builds_without_any_model():
     assert result.manifest["environment"]["sky_fraction"] == 0.0  # PDD-REVIEW R11
     assert "sky" not in result.manifest["layers"]
     read_glb(result.glb)
+
+
+def test_a_360_panorama_builds_a_wrapped_cylindrical_world():
+    rgb = np.zeros((300, 2400, 3), np.uint8)
+    rgb[:100] = (110, 160, 230)
+    rgb[100:] = (80, 110, 50)
+    buffer = io.BytesIO()
+    Image.fromarray(rgb).save(buffer, format="PNG")
+    result = build_world(buffer.getvalue(), profile="mobile", estimator=HeuristicDepthEstimator())
+    camera = result.manifest["camera"]
+    assert camera["projection"] == "cylindrical"
+    assert camera["hfov_deg"] == pytest.approx(360.0, abs=0.5)
+    # No side padding on a wrapped panorama: the edges meet instead.
+    assert result.manifest["source"]["padded"][0] == result.manifest["source"]["working"][0]
+    read_glb(result.glb)
+
+
+def test_every_world_carries_a_textured_environment(mobile_world):
+    result, _ = mobile_world
+    glb = read_glb(result.glb)
+    dome = glb.mesh("dome")["primitives"][0]
+    assert "TEXCOORD_0" in dome["attributes"]
+    texture = glb.document["materials"][dome["material"]]["pbrMetallicRoughness"]["baseColorTexture"]
+    image = glb.document["textures"][texture["index"]]["source"]
+    with Image.open(io.BytesIO(glb.image_bytes(image))) as environment:
+        assert environment.size == (1024, 512)  # power of two: mipmaps on WebGL1 phones
+
+
+def test_validator_accepts_built_worlds(mobile_world):
+    from viewfinder.world.validate import validate_world
+
+    result, _ = mobile_world
+    assert validate_world(result) == []
 
 
 def test_bad_input_is_an_input_error():

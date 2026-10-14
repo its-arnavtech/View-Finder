@@ -79,16 +79,46 @@ Exit codes: `0` ok, `1` engine or model failure, `2` bad input.
 
 | | Phone | Desktop |
 |---|---|---|
-| Explore (Orbit mode) | drag | drag |
+| **Look around** (default) | drag | drag, arrow keys |
 | Move forward/back | pinch | scroll, `W`/`S` |
 | Slide | two-finger drag | right-drag or Shift-drag, `A`/`D`, `Q`/`E` |
-| Turn (Fly mode) | drag | drag, arrow keys |
 | Reset view | double-tap / **Reset** | double-click, `R` |
+| Look by moving the phone | **Tilt** (HTTPS only) | — |
 
-**Orbit** circles a point in front of the camera, which shows the most
-depth. **Fly** turns the head in place to look around. Movement stays inside
-the region where single-photo geometry holds up; **Free roam** lifts that
-limit.
+Dragging turns the view a full 360° and up/down, and the scene follows your
+finger at any zoom. The eye sits slightly in front of a "neck" pivot, so
+turning also shows a little real parallax, the way turning your head does.
+When you turn away from the photo you see a surround synthesised from it,
+deliberately blurred so it never pretends to be real content.
+
+**Orbit** (toolbar) switches a drag to circling a point in front of the
+camera, which shows the most depth. In Orbit mode, Tilt slides the camera
+like a 3D photo. Movement stays inside the region where single-photo
+geometry holds up; **Free roam** lifts that limit.
+
+### Panoramas
+
+Images at least 2.8× wider than tall are treated as panoramas. Their columns
+map linearly to angle around you, up to a full 360° wrap. You look around
+them instead of seeing them squeezed into one frame.
+
+### Phone performance
+
+- A mobile world is about 1 MB (about 0.65 MB on the wire, gzipped): 4–5
+  draw calls, ~45k triangles, 16-bit indices, and about 11 MB of GPU texture
+  memory.
+- The viewer renders only while something moves, and stops when the tab is
+  hidden.
+- The pixel ratio is capped (1.5× on phones) and adapts. It steps down if
+  frames run slower than the device's own frame cap, and back up when there
+  is headroom. It measures that cap itself, so iOS Low Power Mode's 30 fps
+  is not mistaken for a slow GPU.
+- Uploads are resized on the phone to just above the chosen quality's
+  working size (1280 px for mobile).
+- It works on WebGL2 and on WebGL1 (older phones).
+
+Diagnostics: append `?debug=1` for a frame-time/triangle/pixel-ratio overlay,
+or `?webgl=1` to force the WebGL1 path.
 
 ## Python
 
@@ -106,8 +136,9 @@ print(result.manifest["layers"])
 One photo only records one viewpoint. The world looks exactly like the photo
 from where it was taken and shows real depth as you move around it. Behind
 foreground objects you see a plausible smeared continuation, not the true
-hidden content. Beyond the frame the photo fades into a sky and ground
-coloured from the photo itself. Move far enough and the missing sides of
+hidden content. Beyond the frame the photo fades into a blurred 360°
+surround built from the photo itself (mirrored outward, fading to its sky
+and ground tones). Move far enough and the missing sides of
 objects show. That is why movement is limited by default.
 
 Depth is relative, so scenes are in normalised units, not metres. Glass,
@@ -123,3 +154,26 @@ python -m pytest viewfinder/tests/ -k world
 All tests except one run without the depth model, using synthetic scenes
 with known geometry. The real-model test is skipped when the model is not
 installed.
+
+### Stress test: "any image in, a world out"
+
+```bash
+python benchmark-harness/world_stress.py --photos 120 --street 40 --quality mobile
+```
+
+This builds worlds from a seeded random sample of the repository's travel
+photos and street-level benchmark images, plus 19 generated edge cases:
+
+- **Shape:** 8:1 panorama, 1:6 portrait, 48×36 and 7200×4800 images.
+- **Pixel modes:** grayscale, CMYK, 16-bit, half-transparent.
+- **Formats:** animated GIF, TIFF, WebP, BMP.
+- **Content:** all-black, uniform grey, pure noise, a sky-only crop, an
+  EXIF-rotated photo.
+- **Should be refused:** a 12×12 image and a corrupt file.
+
+Every world must pass `viewfinder.world.validate.validate_world`: the GLB
+parses, there is a dome and a photo layer, positions are finite, mobile
+meshes fit 16-bit indices, textures and file size are within budget, and
+the FOV and navigation are sane. Results go to
+`local-data/world-stress/{results.csv,summary.json}`, and the script exits 1
+on any failure.

@@ -32,8 +32,22 @@ def test_focal_length_is_read_and_resizing_keeps_aspect():
     exif.get_ifd(0x8769)[0xA405] = 50
     source = load_source(_jpeg(Image.new("RGB", (3000, 1500)), exif), working_long_side=1024)
     assert source.focal_35mm == 50.0
-    assert source.rgb.shape == (512, 1024, 3)
+    # Area budget of a 1024x768 frame, aspect preserved.
+    height, width = source.rgb.shape[:2]
+    assert width / height == pytest.approx(2.0, abs=0.01)
+    assert width * height == pytest.approx(1024 * 768, rel=0.01)
     assert (source.source_width, source.source_height) == (3000, 1500)
+
+
+def test_four_by_three_photos_keep_the_classic_working_size():
+    source = load_source(_jpeg(Image.new("RGB", (4032, 3024))), working_long_side=1024)
+    assert source.rgb.shape == (768, 1024, 3)
+
+
+def test_panoramas_keep_a_usable_height():
+    source = load_source(_jpeg(Image.new("RGB", (8000, 1000))), working_long_side=1024)
+    height, width = source.rgb.shape[:2]
+    assert width == 2048 and height == 256  # long side capped at 2x, height not a sliver
 
 
 def test_missing_or_corrupt_focal_is_none():
@@ -73,6 +87,28 @@ def test_intrinsics_default_and_exif_fov():
     # Portrait: the 36 mm frame side maps to the long (vertical) side.
     portrait = intrinsics_for(3000, 4000)
     assert portrait.vfov_deg == pytest.approx(expected, rel=1e-6)
+
+
+def test_wide_images_are_cylindrical_panoramas():
+    cinema = intrinsics_for(2390, 1000)
+    assert cinema.projection == "pinhole"
+    pano = intrinsics_for(3000, 1000, focal_35mm=26)  # EXIF focal is ignored for panoramas
+    assert pano.projection == "cylindrical" and pano.focal_source == "panorama"
+    assert pano.vfov_deg == pytest.approx(60.0, abs=0.1)
+    assert 150 < pano.hfov_deg < 360 and not pano.wraps
+    full = intrinsics_for(8000, 1000)
+    assert full.hfov_deg == pytest.approx(360.0, abs=0.01) and full.wraps
+    assert full.max_pad_x() == 0  # nothing to extend: the edges meet
+
+
+def test_cylindrical_rays_are_linear_in_azimuth():
+    pano = intrinsics_for(4000, 1000)
+    centre = pano.rays(np.array([2000.0]), np.array([500.0]))[0]
+    np.testing.assert_allclose(centre, [0, 0, -1], atol=1e-9)
+    # A quarter of the horizontal span to the right is a quarter of hfov in azimuth.
+    ray = pano.rays(np.array([3000.0]), np.array([500.0]))[0]
+    assert math.degrees(math.atan2(ray[0], -ray[2])) == pytest.approx(pano.hfov_deg / 4, rel=1e-6)
+    assert np.hypot(ray[0], ray[2]) == pytest.approx(1.0)  # unit cylinder
 
 
 def test_rays_follow_gltf_convention():
