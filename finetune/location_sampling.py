@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 EARTH_RADIUS_KM = 6371.0088
+BANDED_SPLIT_THRESHOLD = 100_000
 
 
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -93,25 +94,87 @@ def thin_by_spacing(frame: pd.DataFrame, min_spacing_m: float, seed: int = 1337)
     places). Applied to dense Mapillary data it converts a redundant batch into
     a location-diverse one. Rows are shuffled first so the retained set is not
     biased toward whichever tile happens to sort first.
+
+    Latitude-banded so the cost stays near-linear. The straightforward version
+    compared each candidate against every point kept so far and grew that array
+    with ``np.vstack``, which is quadratic in both distance computations and
+    memory copying: at 50,000 points it dominated a whole run's wall time, and
+    it does not reach the millions this pipeline is meant to scale to.
+
+    Banding is **exact, not approximate**. Bands are one threshold tall, so any
+    kept point within ``min_spacing_m`` of a candidate differs in latitude by at
+    most one band; checking the candidate's band and its two neighbours cannot
+    miss a conflict. ``tests/test_location_sampling.py`` asserts the retained
+    set is identical to the brute-force result.
     """
     shuffled = frame.sample(frac=1.0, random_state=seed).reset_index(drop=True)
     coords = shuffled[["lat", "lon"]].to_numpy(dtype=np.float64)
 
-    keep_idx: list[int] = []
-    kept_coords = np.empty((0, 2))
     threshold_km = min_spacing_m / 1000.0
+    # One degree of latitude is ~111.32 km everywhere, so a band of this height
+    # is exactly the threshold tall regardless of longitude convergence.
+    band_degrees = threshold_km / 111.32
 
-    for i, coord in enumerate(coords):
-        if len(kept_coords) == 0:
-            keep_idx.append(i)
-            kept_coords = coord[None, :]
-            continue
-        d = haversine_km(coord[0], coord[1], kept_coords[:, 0], kept_coords[:, 1])
-        if d.min() >= threshold_km:
-            keep_idx.append(i)
-            kept_coords = np.vstack([kept_coords, coord])
+    keep_idx: list[int] = []
+    bands: dict[int, list[tuple[float, float]]] = {}
+
+    for i, (lat, lon) in enumerate(coords):
+        band = int(np.floor(lat / band_degrees))
+        neighbours: list[tuple[float, float]] = []
+        for offset in (-1, 0, 1):
+            found = bands.get(band + offset)
+            if found:
+                neighbours.extend(found)
+
+        if neighbours:
+            near = np.asarray(neighbours)
+            distances = haversine_km(lat, lon, near[:, 0], near[:, 1])
+            if distances.min() < threshold_km:
+                continue
+
+        keep_idx.append(i)
+        bands.setdefault(band, []).append((lat, lon))
 
     return shuffled.iloc[keep_idx].reset_index(drop=True)
+
+
+def _banded_proximity_mask(
+    query_coords: np.ndarray,
+    reference_coords: np.ndarray,
+    min_gap_m: float,
+) -> tuple[np.ndarray, float | None]:
+    """Find every query within ``min_gap_m`` of a reference, exactly.
+
+    This is the split/verifier counterpart to :func:`thin_by_spacing`.  A
+    threshold-height latitude band makes checking the same and adjacent bands
+    sufficient for detecting every violation.  The returned distance is the
+    smallest candidate distance inspected; it is useful diagnostically but is
+    not claimed to be the global nearest pair when it exceeds the threshold.
+    """
+    threshold_km = min_gap_m / 1000.0
+    band_degrees = threshold_km / 111.32
+    raw_bands: dict[int, list[tuple[float, float]]] = {}
+    for lat, lon in reference_coords:
+        band = int(np.floor(lat / band_degrees))
+        raw_bands.setdefault(band, []).append((lat, lon))
+    bands = {band: np.asarray(points) for band, points in raw_bands.items()}
+
+    too_close = np.zeros(len(query_coords), dtype=bool)
+    smallest: float | None = None
+    for index, (lat, lon) in enumerate(query_coords):
+        band = int(np.floor(lat / band_degrees))
+        candidates = [
+            bands[band + offset]
+            for offset in (-1, 0, 1)
+            if band + offset in bands
+        ]
+        if not candidates:
+            continue
+        near = candidates[0] if len(candidates) == 1 else np.concatenate(candidates)
+        distance = float(haversine_km(lat, lon, near[:, 0], near[:, 1]).min())
+        smallest = distance if smallest is None else min(smallest, distance)
+        too_close[index] = distance < threshold_km
+    return too_close, smallest
 
 
 def location_split(
@@ -148,13 +211,19 @@ def location_split(
     train_coords = train[["lat", "lon"]].to_numpy(dtype=np.float64)
     threshold_km = min_gap_m / 1000.0
 
-    too_close = np.zeros(len(train_coords), dtype=bool)
-    for start in range(0, len(train_coords), 512):
-        block = train_coords[start : start + 512]
-        d = haversine_km(
-            block[:, 0][:, None], block[:, 1][:, None], val_coords[:, 0][None, :], val_coords[:, 1][None, :]
+    if len(train_coords) + len(val_coords) >= BANDED_SPLIT_THRESHOLD:
+        too_close, _ = _banded_proximity_mask(
+            train_coords, val_coords, min_gap_m=min_gap_m
         )
-        too_close[start : start + len(block)] = d.min(axis=1) < threshold_km
+    else:
+        too_close = np.zeros(len(train_coords), dtype=bool)
+        for start in range(0, len(train_coords), 512):
+            block = train_coords[start : start + 512]
+            d = haversine_km(
+                block[:, 0][:, None], block[:, 1][:, None],
+                val_coords[:, 0][None, :], val_coords[:, 1][None, :]
+            )
+            too_close[start : start + len(block)] = d.min(axis=1) < threshold_km
 
     dropped = int(too_close.sum())
     train = train[~too_close].reset_index(drop=True)
@@ -167,6 +236,28 @@ def verify_split_separation(train: pd.DataFrame, val: pd.DataFrame, min_gap_m: f
     """Confirm no held-out location sits within `min_gap_m` of a training location."""
     train_coords = train[["lat", "lon"]].to_numpy(dtype=np.float64)
     val_coords = val[["lat", "lon"]].to_numpy(dtype=np.float64)
+
+    if len(train_coords) + len(val_coords) >= BANDED_SPLIT_THRESHOLD:
+        violations, candidate_min_km = _banded_proximity_mask(
+            val_coords, train_coords, min_gap_m=min_gap_m
+        )
+        # If the smallest candidate exceeds the search radius, points outside
+        # the adjacent latitude bands could be closer (but still cannot violate
+        # the threshold). Report the proven lower bound instead of pretending
+        # that a threshold-only index measured the exact global nearest pair.
+        observed_or_bound_m = (
+            float(candidate_min_km * 1000)
+            if candidate_min_km is not None and candidate_min_km < min_gap_m / 1000.0
+            else float(min_gap_m)
+        )
+        return {
+            "min_gap_m_observed": observed_or_bound_m,
+            "min_gap_m_is_lower_bound": not bool(violations.any()),
+            "median_gap_m": None,
+            "violations": int(violations.sum()),
+            "passed": bool(not violations.any()),
+            "algorithm": "exact_latitude_banded_threshold_check",
+        }
 
     mins = []
     for start in range(0, len(val_coords), 512):
@@ -182,4 +273,5 @@ def verify_split_separation(train: pd.DataFrame, val: pd.DataFrame, min_gap_m: f
         "median_gap_m": float(np.median(mins)),
         "violations": int((mins < min_gap_m).sum()),
         "passed": bool((mins >= min_gap_m).all()),
+        "algorithm": "exact_pairwise",
     }

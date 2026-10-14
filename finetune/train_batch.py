@@ -64,6 +64,75 @@ class GeoTrainDataset(Dataset):
         return self.transform(image), torch.tensor(self.coords[idx], dtype=torch.float32)
 
 
+class GeoEmbeddingDataset(Dataset):
+    """Cached frozen-image features plus GPS coordinates."""
+
+    uses_cached_embeddings = True
+
+    def __init__(self, frame):
+        paths = frame["embedding_path"].drop_duplicates().tolist()
+        if len(paths) != 1:
+            raise ValueError(f"Expected one embedding cache, found {paths}")
+        self.cache_path = paths[0]
+        self.indices = frame["embedding_index"].to_numpy(dtype=np.int64)
+        self.coords = frame[["lat", "lon"]].to_numpy(dtype=np.float32)
+        self.embedding_count = int(frame["embedding_count"].iloc[0])
+        self.embedding_dim = int(frame["embedding_dim"].iloc[0])
+        self._cache = None
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def _open_cache(self):
+        if self._cache is None:
+            self._cache = np.memmap(
+                self.cache_path,
+                mode="r",
+                dtype=np.float16,
+                shape=(self.embedding_count, self.embedding_dim),
+            )
+        return self._cache
+
+    def __getitem__(self, idx):
+        # Copy detaches the tensor from the read-only memmap and avoids PyTorch's
+        # undefined-behaviour warning for non-writable numpy buffers.
+        feature = torch.from_numpy(np.array(self._open_cache()[self.indices[idx]], copy=True))
+        return feature, torch.tensor(self.coords[idx], dtype=torch.float32)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_cache"] = None
+        return state
+
+
+def should_step_evaluate(
+    step: int,
+    *,
+    step_eval_every: int = 0,
+    step_eval_until: int = 0,
+    step_eval_early_every: int = 0,
+    step_eval_early_until: int = 0,
+) -> bool:
+    """Return whether ``step`` is on a two-phase mid-epoch probe schedule.
+
+    The early cadence takes precedence through ``step_eval_early_until``;
+    afterward the ordinary cadence applies through ``step_eval_until``.
+    """
+    if step < 1:
+        return False
+    if step_eval_early_every < 0 or step_eval_early_until < 0:
+        raise ValueError("early step-eval cadence and boundary must be non-negative")
+    if step_eval_every < 0 or step_eval_until < 0:
+        raise ValueError("step-eval cadence and boundary must be non-negative")
+    if step_eval_early_every and step_eval_early_until and step <= step_eval_early_until:
+        return step % step_eval_early_every == 0
+    return bool(
+        step_eval_every
+        and step % step_eval_every == 0
+        and (not step_eval_until or step <= step_eval_until)
+    )
+
+
 def train_one_batch(
     model,
     frame,
@@ -83,6 +152,13 @@ def train_one_batch(
     eval_every_epochs: int = 0,
     early_stop_patience: int = 0,
     select_metric: str = "median_error_km",
+    selectors: "list | None" = None,
+    step_eval_every: int = 0,
+    step_eval_until: int = 0,
+    step_eval_early_every: int = 0,
+    step_eval_early_until: int = 0,
+    reg_strength: float = 0.0,
+    reg_reference: "dict[str, torch.Tensor] | None" = None,
 ) -> tuple[list[dict], list[dict], dict]:
     """Run the contrastive training loop over one batch of data.
 
@@ -92,12 +168,44 @@ def train_one_batch(
     converging rather than merely running.
 
     Training loss on this data keeps falling long after held-out error starts
-    regressing, so the final weights are not the best weights. `select_metric`
-    (lower is better) is tracked across evaluations, the best state is saved
-    separately as location_encoder_best.pth, and `early_stop_patience`
-    consecutive non-improving evaluations end the run.
+    regressing, so the final weights are not the best weights.
+
+    Selection is plural. `selectors` is a list of
+    :class:`checkpoint_selection.CheckpointSelector`, each tracking one metric
+    into its own checkpoint file; the one with `drives_early_stop` set governs
+    `early_stop_patience`. Passing None keeps the original single-metric
+    behaviour on `select_metric`, writing location_encoder_best.pth, so callers
+    that predate multi-metric selection are unaffected.
+
+    The returned `best` dict describes the early-stop-driving selector, which
+    keeps the old three-tuple contract intact; every selector's own state is on
+    the objects the caller passed in.
+
+    `step_eval_every` additionally evaluates mid-epoch, every N optimizer steps,
+    for the first `step_eval_until` steps (0 = the whole run). The optional
+    `step_eval_early_every` cadence takes precedence through
+    `step_eval_early_until`, allowing every-step probes before falling back to
+    the normal dense cadence. Epoch-granularity
+    probing is too coarse early on: in the commons01 run essentially all of the
+    external gain arrived inside the first epoch's 107 steps and was already
+    decaying by the second, so a per-epoch probe cannot locate the optimum or
+    even confirm it is inside epoch 0. These dense points feed the selectors
+    like any other, so a step-50 checkpoint can win.
+
+    When ``reg_strength`` is non-zero, ``reg_reference`` must contain a frozen
+    copy of every trainable location-encoder parameter.  The loss then includes
+    an L2-SP penalty ``strength * sum((parameter - starting_parameter) ** 2)``.
+    Unlike AdamW's ordinary weight decay (toward zero), this explicitly resists
+    drift away from the checkpoint that initialized this run.
     """
-    dataset = GeoTrainDataset(frame)
+    from checkpoint_selection import legacy_selector
+
+    owns_selectors = selectors is None
+    if owns_selectors:
+        selectors = [legacy_selector(select_metric)]
+    driver = next((s for s in selectors if s.drives_early_stop), selectors[0])
+    cached_embeddings = "embedding_path" in frame.columns
+    dataset = GeoEmbeddingDataset(frame) if cached_embeddings else GeoTrainDataset(frame)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -122,16 +230,36 @@ def train_one_batch(
     criterion = nn.CrossEntropyLoss()
     targets = torch.arange(batch_size, device=device)
 
+    if reg_strength < 0:
+        raise ValueError("reg_strength must be non-negative")
+    if reg_strength and reg_reference is None:
+        raise ValueError("reg_reference is required when reg_strength is non-zero")
+    if reg_reference is not None:
+        expected = {
+            name for name, parameter in model.location_encoder.named_parameters()
+            if parameter.requires_grad
+        }
+        if set(reg_reference) != expected:
+            missing = sorted(expected - set(reg_reference))
+            extra = sorted(set(reg_reference) - expected)
+            raise ValueError(
+                f"reg_reference does not match trainable parameters; "
+                f"missing={missing}, extra={extra}"
+            )
+
     os.makedirs(ckpt_dir, exist_ok=True)
     history: list[dict] = []
     trajectory: list[dict] = []
-    best = {"value": float("inf"), "epoch": None, "step": None, "path": None, "metrics": None}
-    stale_evals = 0
+    epoch_wall_times: list[dict] = []
     global_step = 0
     log_file = open(log_path, "a", encoding="utf-8")
 
+    input_label = "cached image embeddings" if cached_embeddings else "raw images"
     print(f"\ntraining: {len(dataset)} images | {len(loader)} steps/epoch | "
           f"{epochs} epochs | {total_steps} total steps | batch {batch_size} | amp={amp}")
+    print(f"training input: {input_label}")
+    if reg_strength:
+        print(f"L2-SP: strength={reg_strength:g}, anchored to this run's initialized weights")
     print(f"{'step':>6} {'epoch':>6} {'loss':>10} {'lr':>10} {'peak_GB':>9} {'sec':>7}")
     print("-" * 54)
 
@@ -140,10 +268,10 @@ def train_one_batch(
     started = time.perf_counter()
 
     for epoch in range(epochs):
+        epoch_started = time.perf_counter()
         epoch_losses = []
-        for imgs, gps in loader:
+        for image_inputs, gps in loader:
             step_start = time.perf_counter()
-            imgs = imgs.to(device, non_blocking=True)
             gps = gps.to(device, non_blocking=True)
 
             # GPS queue supplies extra negatives beyond the in-batch ones.
@@ -153,14 +281,18 @@ def train_one_batch(
 
             optimizer.zero_grad(set_to_none=True)
 
-            # Frozen image side: no graph, no stored activations.
-            with torch.no_grad():
-                if amp:
-                    with torch.autocast("cuda", dtype=torch.float16):
+            if cached_embeddings:
+                image_features = image_inputs.to(device, non_blocking=True).float()
+            else:
+                imgs = image_inputs.to(device, non_blocking=True)
+                # Frozen image side: no graph, no stored activations.
+                with torch.no_grad():
+                    if amp:
+                        with torch.autocast("cuda", dtype=torch.float16):
+                            image_features = model.image_encoder(imgs)
+                        image_features = image_features.float()
+                    else:
                         image_features = model.image_encoder(imgs)
-                    image_features = image_features.float()
-                else:
-                    image_features = model.image_encoder(imgs)
 
             # Trainable location encoder.
             location_features = model.location_encoder(gps_all)
@@ -168,7 +300,15 @@ def train_one_batch(
             logits = model.logit_scale.exp() * (
                 F.normalize(image_features, dim=1) @ F.normalize(location_features, dim=1).t()
             )
-            loss = criterion(logits, targets)
+            contrastive_loss = criterion(logits, targets)
+            if reg_strength:
+                l2sp_distance = l2sp_penalty(model.location_encoder, reg_reference)
+                regularization_loss = reg_strength * l2sp_distance
+                loss = contrastive_loss + regularization_loss
+            else:
+                l2sp_distance = torch.zeros((), device=device)
+                regularization_loss = torch.zeros((), device=device)
+                loss = contrastive_loss
             loss.backward()
             optimizer.step()
             scheduler.step()
@@ -180,6 +320,9 @@ def train_one_batch(
                 "step": global_step,
                 "epoch": epoch,
                 "loss": loss_value,
+                "contrastive_loss": float(contrastive_loss.item()),
+                "l2sp_distance": float(l2sp_distance.item()),
+                "regularization_loss": float(regularization_loss.item()),
                 "lr": scheduler.get_last_lr()[0],
                 "peak_reserved_gb": torch.cuda.max_memory_reserved() / 1024**3,
                 "sec": time.perf_counter() - step_start,
@@ -195,6 +338,55 @@ def train_one_batch(
                 print(f"{record['step']:>6} {record['epoch']:>6} {record['loss']:>10.5f} "
                       f"{record['lr']:>10.2e} {record['peak_reserved_gb']:>9.3f} {record['sec']:>7.3f}")
 
+            # Dense mid-epoch probing. Selectors see these exactly like an
+            # epoch-boundary evaluation, so an early-step checkpoint can win.
+            if eval_hook and should_step_evaluate(
+                global_step,
+                step_eval_every=step_eval_every,
+                step_eval_until=step_eval_until,
+                step_eval_early_every=step_eval_early_every,
+                step_eval_early_until=step_eval_early_until,
+            ):
+                step_metrics = eval_hook(epoch, global_step)
+                running_loss = float(np.mean(epoch_losses))
+                trajectory.append({
+                    "epoch": epoch,
+                    "step": global_step,
+                    "mean_loss": running_loss,
+                    "mid_epoch": True,
+                    "training_elapsed_seconds": time.perf_counter() - started,
+                    **step_metrics,
+                })
+
+                def save_step(filename: str, _step=global_step, _loss=running_loss) -> str:
+                    path = os.path.join(ckpt_dir, filename)
+                    torch.save(
+                        {
+                            "location_encoder": model.location_encoder.state_dict(),
+                            "step": _step,
+                            "epoch": epoch,
+                            "loss": _loss,
+                            "saved_at": datetime.now(timezone.utc).isoformat(),
+                            "note": "location encoder only; image encoder and "
+                                    "logit_scale are unchanged pretrained weights",
+                        },
+                        path,
+                    )
+                    return path
+
+                improved_now = [
+                    s.name for s in selectors
+                    if s.offer(step_metrics, epoch=epoch, step=global_step, save=save_step)
+                ]
+                # Keep a scoreable artifact at every dense probe so the run can
+                # be re-scored later without retraining.
+                save_checkpoint(model, ckpt_dir, global_step, running_loss, tag="probe")
+                if improved_now:
+                    print(f"    step {global_step}: new best[{','.join(improved_now)}]")
+
+                model.train()
+                model.image_encoder.eval()
+
         line = f"  epoch {epoch:>3} mean loss: {np.mean(epoch_losses):.5f}"
 
         # Checkpoint at the end of every epoch. A fixed step interval silently
@@ -207,37 +399,115 @@ def train_one_batch(
         if eval_hook and eval_every_epochs and ((epoch + 1) % eval_every_epochs == 0 or epoch == epochs - 1):
             metrics = eval_hook(epoch, global_step)
             trajectory.append({"epoch": epoch, "step": global_step, "mean_loss": float(np.mean(epoch_losses)),
-                               "epoch_checkpoint": epoch_ckpt, **metrics})
+                               "epoch_checkpoint": epoch_ckpt,
+                               "training_elapsed_seconds": time.perf_counter() - started,
+                               **metrics})
             line += (f"  | held-out median {metrics['median_error_km']:.1f} km"
                      f"  acc@25km {metrics['acc_25km']:.4f}")
 
-            current = metrics[select_metric]
-            if current < best["value"]:
-                best.update(
-                    value=float(current),
-                    epoch=epoch,
-                    step=global_step,
-                    metrics=metrics,
-                    path=save_checkpoint(model, ckpt_dir, global_step, float(np.mean(epoch_losses)), tag="best"),
+            mean_loss = float(np.mean(epoch_losses))
+
+            def save_as(filename: str) -> str:
+                """Persist the current state under an explicit filename."""
+                path = os.path.join(ckpt_dir, filename)
+                torch.save(
+                    {
+                        "location_encoder": model.location_encoder.state_dict(),
+                        "step": global_step,
+                        "epoch": epoch,
+                        "loss": mean_loss,
+                        "saved_at": datetime.now(timezone.utc).isoformat(),
+                        "note": "location encoder only; image encoder and logit_scale "
+                                "are unchanged pretrained weights",
+                    },
+                    path,
                 )
-                stale_evals = 0
-                line += "  <- best"
-            else:
-                stale_evals += 1
-                if early_stop_patience and stale_evals >= early_stop_patience:
-                    line += f"  | early stop ({stale_evals} evals without improvement)"
-                    stop_now = True
+                return path
+
+            improved = []
+            for selector in selectors:
+                # Legacy single-selector callers keep the historical filename.
+                if owns_selectors:
+                    target = lambda _name: save_checkpoint(  # noqa: E731
+                        model, ckpt_dir, global_step, mean_loss, tag="best"
+                    )
+                else:
+                    target = save_as
+                if selector.offer(metrics, epoch=epoch, step=global_step, save=target):
+                    improved.append(selector.name)
+
+            if improved:
+                line += f"  <- best[{','.join(improved)}]"
 
             model.train()
             model.image_encoder.eval()
+
+        # Close the epoch on every selector, then judge patience in EPOCHS.
+        # Done outside the eval block so the clock stays honest for an epoch
+        # that produced no evaluation at all. Patience is spent only by the
+        # driving selector; another metric improving is not evidence that the
+        # one being optimised did.
+        for selector in selectors:
+            selector.end_epoch()
+        if early_stop_patience and driver.stale_epochs >= early_stop_patience:
+            line += (f"  | early stop ({driver.stale_epochs} epoch(s) without "
+                     f"improvement on {driver.name})")
+            stop_now = True
+
+        epoch_seconds = time.perf_counter() - epoch_started
+        epoch_wall_times.append({
+            "epoch": epoch,
+            "steps": len(epoch_losses),
+            "wall_seconds": epoch_seconds,
+        })
+        line += f"  | epoch wall {epoch_seconds:.1f}s"
 
         print(line)
         if stop_now:
             break
 
     log_file.close()
-    print(f"\ntraining wall time: {time.perf_counter() - started:.1f}s")
+    training_wall_seconds = time.perf_counter() - started
+    print(f"\ntraining wall time: {training_wall_seconds:.1f}s")
+
+    # The three-tuple contract is unchanged: `best` describes the selector that
+    # governed early stopping. Callers using multiple selectors read the rest
+    # off the objects they passed in.
+    best = {
+        "value": driver.value,
+        "epoch": driver.epoch,
+        "step": driver.step,
+        "path": driver.path,
+        "metrics": driver.metrics,
+        "selector": driver.name,
+        "epoch_wall_times": epoch_wall_times,
+        "training_wall_seconds": training_wall_seconds,
+    }
     return history, trajectory, best
+
+
+def capture_l2sp_reference(module: nn.Module) -> dict[str, torch.Tensor]:
+    """Freeze the current trainable parameters as an L2-SP anchor."""
+    return {
+        name: parameter.detach().clone()
+        for name, parameter in module.named_parameters()
+        if parameter.requires_grad
+    }
+
+
+def l2sp_penalty(
+    module: nn.Module,
+    reference: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """Return the unscaled squared distance from ``reference`` weights."""
+    terms = [
+        (parameter - reference[name]).square().sum()
+        for name, parameter in module.named_parameters()
+        if parameter.requires_grad
+    ]
+    if not terms:
+        raise ValueError("module has no trainable parameters for L2-SP")
+    return torch.stack(terms).sum()
 
 
 def save_checkpoint(model, ckpt_dir: str, step: int, loss: float, tag: str = "step") -> str:

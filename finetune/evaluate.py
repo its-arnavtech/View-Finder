@@ -45,6 +45,17 @@ class ValImageDataset(Dataset):
 @torch.no_grad()
 def encode_val_images(model, frame, batch_size: int, device: str, num_workers: int = 0, amp: bool = True):
     """Return (image_features [N,512] on device, true_coords [N,2] numpy)."""
+    if "embedding_path" in frame.columns:
+        paths = frame["embedding_path"].drop_duplicates().tolist()
+        if len(paths) != 1:
+            raise ValueError(f"Expected one embedding cache, found {paths}")
+        count = int(frame["embedding_count"].iloc[0])
+        dim = int(frame["embedding_dim"].iloc[0])
+        cache = np.memmap(paths[0], mode="r", dtype=np.float16, shape=(count, dim))
+        indices = frame["embedding_index"].to_numpy(dtype=np.int64)
+        features = torch.from_numpy(np.array(cache[indices], copy=True)).to(device).float()
+        return F.normalize(features, dim=1), frame[["lat", "lon"]].to_numpy(dtype=np.float64)
+
     loader = DataLoader(
         ValImageDataset(frame),
         batch_size=batch_size,

@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 # Extensions routed to this module by the CLI.
 # Re-exported from formats.py, the single source of truth for accepted inputs.
 from .formats import VIDEO_EXTENSIONS  # noqa: F401
+from .progress import report as _report_progress
 
 # Defaults. These are deliberately permissive: it is better to hand the model a
 # mediocre frame than to hand it nothing at all.
@@ -126,6 +127,7 @@ def extract_frames(
     blur_threshold: float = DEFAULT_BLUR_THRESHOLD,
     dedup_threshold: float = DEFAULT_DEDUP_THRESHOLD,
     max_frames: int | None = None,
+    progress: Any = False,
 ) -> tuple[list[Frame], ExtractionStats]:
     """Sample, filter and return frames from a video.
 
@@ -139,6 +141,9 @@ def extract_frames(
             between consecutive kept frames. Pass ``0`` to disable dedup.
         max_frames: Optional cap on the number of frames returned. Sampling
             stops once the cap is reached.
+        progress: ``True`` to log sampling progress, or a ``(done, total)``
+            callable to drive a progress bar or GUI. ``done`` counts sampled
+            frames, most of which may be filtered out before they are returned.
 
     Returns:
         A ``(frames, stats)`` tuple. ``frames`` is ordered by timestamp.
@@ -160,7 +165,7 @@ def extract_frames(
         raise RuntimeError(f"Could not open video: {video_path}")
 
     try:
-        return _sample(capture, fps, blur_threshold, dedup_threshold, max_frames)
+        return _sample(capture, fps, blur_threshold, dedup_threshold, max_frames, progress)
     finally:
         capture.release()
 
@@ -171,6 +176,7 @@ def _sample(
     blur_threshold: float,
     dedup_threshold: float,
     max_frames: int | None,
+    progress: Any = False,
 ) -> tuple[list[Frame], ExtractionStats]:
     """Drive the decode loop. Split out so the caller can own capture cleanup."""
     native_fps = capture.get(cv2.CAP_PROP_FPS)
@@ -189,6 +195,11 @@ def _sample(
 
     # One frame is retained every `stride` decoded frames.
     stride = max(1, int(round(native_fps / fps))) if fps > 0 else 1
+
+    # How many frames sampling will visit, for the progress denominator. Capped
+    # by max_frames only loosely: filtering means the cap may never be reached,
+    # so the honest estimate is the full strided count.
+    expected = (total_frames + stride - 1) // stride if total_frames else 0
 
     frames: list[Frame] = []
     # Sharpest rejected frames, kept only in case *everything* fails the blur
@@ -210,6 +221,13 @@ def _sample(
             continue
 
         stats.sampled += 1
+        _report_progress(
+            progress,
+            stats.sampled,
+            max(expected, stats.sampled),
+            logger=logger,
+            message="Sampled %d/%d video frames",
+        )
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         sharpness = blur_score(gray)
         timestamp = index / native_fps

@@ -116,6 +116,31 @@ def download_social_video(
         raise MediaSourceError(
             "only public instagram.com and tiktok.com video URLs are supported"
         )
+    return download_media(
+        url,
+        download_dir=download_dir,
+        max_duration_seconds=max_duration_seconds,
+        max_download_bytes=max_download_bytes,
+    )
+
+
+def download_media(
+    url: str,
+    *,
+    download_dir: str | Path = DEFAULT_DOWNLOAD_DIR,
+    max_duration_seconds: int = DEFAULT_MAX_DURATION_SECONDS,
+    max_download_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
+) -> ResolvedMedia:
+    """Download one public video from any host yt-dlp supports.
+
+    Identical to :func:`download_social_video` minus the Instagram/TikTok
+    allowlist. The CLI keeps the narrow wrapper because its documented contract
+    is those two platforms; the Discord bot uses this one, where a user may
+    paste a YouTube, Reddit or Twitter link and reasonably expect it to work.
+
+    The same guards apply either way: no cookies or credentials, no live
+    streams, a duration cap and a hard size cap.
+    """
     if max_duration_seconds <= 0:
         raise MediaSourceError("maximum video duration must be greater than zero")
     if max_download_bytes <= 0:

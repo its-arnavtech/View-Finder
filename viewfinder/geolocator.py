@@ -41,10 +41,69 @@ logger = logging.getLogger(__name__)
 
 # Re-exported from formats.py, the single source of truth for accepted inputs.
 from .formats import IMAGE_EXTENSIONS  # noqa: F401
+from .progress import report as _report_progress
 
 # Optional custom GPS gallery, selectable without code changes.
 GALLERY_ENV = "VIEWFINDER_GALLERY"
 GALLERY_MODE_ENV = "VIEWFINDER_GALLERY_MODE"
+
+# --- Fine-tuned location encoder ----------------------------------------
+#
+# Only the location encoder was ever trained (9.45 M of GeoCLIP's 314 M
+# parameters). The CLIP vision tower, its projection head, the logit scale and
+# the GPS gallery are all untouched stock GeoCLIP, so loading this swaps one
+# MLP and changes nothing else about how an image is embedded.
+#
+# osv5m_reg_narrow_30 is an L2-SP run (regularisation strength 30) on OSV-5M.
+# It scores 953.46 km median error on the independent 1000-image benchmark
+# against stock GeoCLIP's 1330.86 km -- a 377.4 km improvement, and 38.5 km
+# better than the previous best checkpoint (osv5m04, 991.98 km).
+#
+# Set VIEWFINDER_LOCATION_ENCODER to point elsewhere, or pass
+# use_stock_geoclip=True / --use-stock-geoclip to skip it entirely.
+LOCATION_ENCODER_ENV = "VIEWFINDER_LOCATION_ENCODER"
+DEFAULT_LOCATION_ENCODER = Path(
+    "finetune/checkpoints/osv5m_reg_narrow_30/location_encoder_best_external.pth"
+)
+FINETUNED_ENCODER_INFO = {
+    "run": "osv5m_reg_narrow_30",
+    "method": "L2-SP fine-tune on OSV-5M, regularisation strength 30",
+    "external_median_error_km": 953.46,
+    "stock_median_error_km": 1330.86,
+    "benchmark": "benchmark-data/manifest.csv, 1000-image fixed sample",
+}
+
+
+def _resolve_location_encoder(explicit: str | os.PathLike[str] | None) -> Path:
+    """Resolve the fine-tuned location encoder and fail if it is unavailable.
+
+    Checked against the working directory first and then the repository root,
+    so a run started from anywhere still finds the bundled checkpoint.
+
+    Stock GeoCLIP is an explicit comparison mode. Silently falling back here
+    would make the product's default depend on the launch directory or a
+    missing local artifact while still producing plausible-looking answers.
+    """
+    candidate = explicit if explicit is not None else os.getenv(LOCATION_ENCODER_ENV)
+    if candidate:
+        path = Path(candidate).expanduser().resolve()
+        if path.is_file():
+            return path
+        raise FileNotFoundError(
+            f"Fine-tuned location encoder not found: {path}. "
+            "Restore the checkpoint or use --use-stock-geoclip intentionally."
+        )
+
+    repo_root = Path(__file__).resolve().parent.parent
+    for base in (Path.cwd(), repo_root):
+        path = (base / DEFAULT_LOCATION_ENCODER).resolve()
+        if path.is_file():
+            return path
+    raise FileNotFoundError(
+        "Fine-tuned location encoder not found at "
+        f"{(repo_root / DEFAULT_LOCATION_ENCODER).resolve()}. "
+        "Restore the checkpoint or use --use-stock-geoclip intentionally."
+    )
 GALLERY_MODES = ("augment", "replace")
 DEFAULT_GALLERY_MODE = "augment"
 
@@ -203,6 +262,19 @@ def _silence_slow_processor_notice() -> None:
     transformers_logger._viewfinder_use_fast_filtered = True  # type: ignore[attr-defined]
 
 
+class _EncoderProvenance:
+    """Which location encoder a result came from, for the output JSON."""
+
+    def __init__(self, info: dict[str, Any]) -> None:
+        self._info = dict(info)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "image_encoder": "geoclip-stock (CLIP ViT-L/14, untouched)",
+            "location_encoder": self._info,
+        }
+
+
 class GeoLocator:
     """Loads GeoCLIP once and scores images against its cached GPS gallery."""
 
@@ -212,6 +284,8 @@ class GeoLocator:
         offline: bool = False,
         gallery_path: str | os.PathLike[str] | None = None,
         gallery_mode: str | None = None,
+        use_stock_geoclip: bool = False,
+        location_encoder_path: str | os.PathLike[str] | None = None,
     ) -> None:
         """Load the model and pre-encode the GPS gallery.
 
@@ -230,6 +304,10 @@ class GeoLocator:
                 ``"replace"`` swaps the gallery out entirely, which restricts
                 every prediction to the custom coordinates. Falls back to
                 ``$VIEWFINDER_GALLERY_MODE``.
+            use_stock_geoclip: Skip the fine-tuned location encoder and keep
+                GeoCLIP's original weights. For comparison and debugging.
+            location_encoder_path: Explicit checkpoint to load instead of the
+                bundled one. Falls back to ``$VIEWFINDER_LOCATION_ENCODER``.
 
         Raises:
             ValueError: If ``gallery_mode`` is not a recognised mode.
@@ -249,6 +327,38 @@ class GeoLocator:
         logger.info("Loading GeoCLIP on %s", self.device)
 
         self.model = GeoCLIP()
+
+        # Swap in the fine-tuned location encoder before the model moves to the
+        # device. Only this MLP changes; the CLIP tower, its projection head,
+        # the logit scale and the GPS gallery stay stock.
+        self.location_encoder_info: dict[str, Any] = {"source": "geoclip-stock"}
+        if not use_stock_geoclip:
+            checkpoint = _resolve_location_encoder(location_encoder_path)
+            state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+            weights = state.get("location_encoder", state)
+            # strict=True on purpose: a silent partial load would leave a
+            # half-trained encoder that still runs and quietly scores worse.
+            self.model.location_encoder.load_state_dict(weights, strict=True)
+            self.location_encoder_info = {
+                "source": "fine-tuned",
+                "path": str(checkpoint),
+                "trained_step": state.get("step"),
+                **FINETUNED_ENCODER_INFO,
+            }
+            logger.info(
+                "Loaded fine-tuned location encoder (%s, step %s): "
+                "%.2f km external median vs stock %.2f km",
+                FINETUNED_ENCODER_INFO["run"],
+                state.get("step"),
+                FINETUNED_ENCODER_INFO["external_median_error_km"],
+                FINETUNED_ENCODER_INFO["stock_median_error_km"],
+            )
+
+        # Surfaced in the JSON output so a saved result always records which
+        # location encoder produced it. Without this, a fine-tuned and a stock
+        # run are indistinguishable after the fact.
+        self.provenance = _EncoderProvenance(self.location_encoder_info)
+
         self.model.eval()
         self.model.to(self.device)
 
@@ -382,7 +492,7 @@ class GeoLocator:
         frames: Sequence["FrameLike"],
         top_k: int = 5,
         batch_size: int = DEFAULT_BATCH_SIZE,
-        progress: bool = False,
+        progress: Any = False,
     ) -> list[FramePrediction]:
         """Score extracted video frames in batches.
 
@@ -391,7 +501,8 @@ class GeoLocator:
                 ``blur_score`` -- i.e. :class:`video_processor.Frame`.
             top_k: Candidates to retain per frame.
             batch_size: Frames per forward pass.
-            progress: Log progress after each batch.
+            progress: ``True`` to log a line per batch, or a
+                ``(done, total)`` callable to drive a progress bar or GUI.
 
         Returns:
             One :class:`FramePrediction` per frame, in input order.
@@ -409,8 +520,13 @@ class GeoLocator:
                         blur_score=frame.blur_score,
                     )
                 )
-            if progress:
-                logger.info("Geolocated %d/%d frames", len(predictions), len(frames))
+            _report_progress(
+                progress,
+                len(predictions),
+                len(frames),
+                logger=logger,
+                message="Geolocated %d/%d frames",
+            )
 
         return predictions
 

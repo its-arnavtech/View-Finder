@@ -11,7 +11,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, TextIO, TypeVar
 
 
 logger = logging.getLogger("viewfinder")
@@ -21,14 +21,41 @@ logger = logging.getLogger("viewfinder")
 # (`python -m viewfinder.main`) and as a script (`python viewfinder/main.py`).
 try:
     from .formats import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
+    from .progress import TerminalProgressBar
 except ImportError:  # pragma: no cover - script invocation
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from viewfinder.formats import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
+    from viewfinder.progress import TerminalProgressBar
 DEFAULT_FPS = 1.0
 DEFAULT_TOP_K = 5
 DEFAULT_MAX_PREDICTIONS = 5
 
+# GeoCLIP is the default visual predictor. The retrieval and ensemble predictors
+# that previously shared this slot are shelved in experiments/retrieval/ -- they
+# worked, but only inside their gallery's footprint, and contributed nothing on
+# globally diverse imagery. See "Retrieval and ensemble" in README.md.
+DEFAULT_PREDICTOR = "geoclip"
+
 _T = TypeVar("_T")
+
+# label -> a context manager exposing .update(done, total). The CLI supplies
+# terminal bars; the desktop GUI supplies widget-updating adapters.
+ProgressFactory = Callable[[str], Any]
+
+
+def _terminal_progress_factory(*, quiet: bool, verbose: bool) -> ProgressFactory:
+    """Build progress bars for terminal use.
+
+    Bars are suppressed under --quiet (which prints only the machine-readable
+    result) and under --verbose, where per-batch debug logging is already the
+    progress indication and would shred a carriage-return bar.
+    """
+    enabled = not quiet and not verbose
+
+    def make(label: str) -> TerminalProgressBar:
+        return TerminalProgressBar(label, enabled=enabled)
+
+    return make
 
 
 class PipelineError(RuntimeError):
@@ -118,34 +145,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--predictor",
         choices=(
+            "geoclip",
             "hybrid",
             "cloud-hybrid",
-            "geoclip",
-            "retrieval",
-            "both",
-            "ensemble",
             "plonk-osv",
             "plonk-yfcc",
             "trusted",
         ),
-        default="hybrid",
-        help=(
-            "which geolocation system to run: hybrid (default) uses fully local "
-            "EXIF/OCR/GeoNames/Commons evidence; cloud-hybrid is the optional Google "
-            "implementation; geoclip and PLONK are visual models; retrieval matches "
-            "a reference gallery; both compares GeoCLIP and retrieval; ensemble merges "
-            "them, letting retrieval override GeoCLIP only where the gallery has a "
-            "strong reference match; trusted runs GeoCLIP plus both PLONK models "
-            "(default: %(default)s)"
-        ),
-    )
-    parser.add_argument(
-        "--ensemble-trust-threshold",
-        type=float,
         default=None,
         help=(
-            "with --predictor ensemble, the retrieval top-1 cosine similarity at or "
-            "above which retrieval's answer becomes primary (default: calibrated 0.825)"
+            "which geolocation system to run: geoclip (default) and PLONK are visual "
+            "models; hybrid uses fully local EXIF/OCR/GeoNames/Commons evidence and is "
+            "fail-closed; cloud-hybrid is the optional Google implementation; "
+            f"trusted runs GeoCLIP plus both PLONK models (default: {DEFAULT_PREDICTOR})"
         ),
     )
     parser.add_argument(
@@ -171,15 +183,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "local GeoNames/OCR/Commons/OSM data root used by --predictor hybrid "
             "(default: %(default)s; env: VIEWFINDER_LOCAL_DATA)"
-        ),
-    )
-    parser.add_argument(
-        "--gallery-path",
-        metavar="PATH",
-        help=(
-            "gallery version directory built by gallery-pipeline's load stage, e.g. "
-            "gallery-pipeline/data/target-regions/gallery/v1 "
-            "(required for --predictor retrieval or both)"
         ),
     )
     parser.add_argument(
@@ -248,6 +251,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-formats",
         action="store_true",
         help="print every accepted image and video extension, then exit",
+    )
+    parser.add_argument(
+        "--use-stock-geoclip",
+        action="store_true",
+        help=(
+            "use GeoCLIP's original location encoder instead of the bundled "
+            "fine-tuned one. The fine-tuned encoder scores 953 km median error on "
+            "the independent benchmark against stock's 1331 km, so this is for "
+            "comparison and debugging rather than normal use"
+        ),
+    )
+    parser.add_argument(
+        "--crop-screen",
+        choices=("auto", "off"),
+        default="auto",
+        help=(
+            "when the input is a photo *of* a display or framed picture, crop to the "
+            "screen's content before predicting, so the model judges the scene rather "
+            "than the room around it. auto (default) only acts on a confident "
+            "detection and leaves ordinary photographs untouched; off disables it "
+            "(default: %(default)s)"
+        ),
     )
     parser.add_argument(
         "--remove-text",
@@ -364,27 +389,6 @@ def _validate_args(args: argparse.Namespace) -> tuple[Path, str, Path]:
             "select a visual predictor for video"
         )
 
-    if args.ensemble_trust_threshold is not None:
-        if args.predictor != "ensemble":
-            raise UserInputError(
-                "--ensemble-trust-threshold is only valid with --predictor ensemble"
-            )
-        if not 0.0 <= args.ensemble_trust_threshold <= 1.0:
-            raise UserInputError(
-                "--ensemble-trust-threshold must be a cosine similarity in [0, 1]"
-            )
-
-    if args.predictor in ("retrieval", "both", "ensemble"):
-        if not args.gallery_path:
-            raise UserInputError(
-                f"--predictor {args.predictor} requires --gallery-path pointing at a gallery "
-                "version directory built by gallery-pipeline, "
-                "e.g. --gallery-path gallery-pipeline/data/target-regions/gallery/v1"
-            )
-        gallery_path = Path(args.gallery_path).expanduser().resolve()
-        if not gallery_path.is_dir():
-            raise UserInputError(f"--gallery-path is not a directory: {gallery_path}")
-
     if args.output:
         output_path = Path(args.output).expanduser().resolve()
     else:
@@ -421,36 +425,18 @@ def _stage(name: str, operation: Callable[[], _T], *, hint: str = "") -> _T:
     return value
 
 
-def _new_geolocator() -> Any:
+def _new_geolocator(use_stock_geoclip: bool = False) -> Any:
     """Construct GeoCLIP in enforced offline mode.
 
     Any custom gallery selection is read from the environment, which the CLI
     flags populate in :func:`run`. This keeps the construction signature stable
     for both the image and video pipelines.
+
+    By default this loads the fine-tuned location encoder; ``use_stock_geoclip``
+    keeps GeoCLIP's original weights for comparison.
     """
     geolocator_class = _import_attr("geolocator", "GeoLocator")
-    return geolocator_class(offline=True)
-
-
-def _new_retrieval_geolocator(gallery_path: str) -> Any:
-    """Construct the image-to-image retrieval predictor for one gallery."""
-    retrieval_class = _import_attr("retrieval_geolocator", "RetrievalGeolocator")
-    return retrieval_class(gallery_path)
-
-
-def _new_ensemble_geolocator(gallery_path: str, trust_threshold: float | None):
-    """Compose GeoCLIP and retrieval behind the calibrated trust threshold.
-
-    Both underlying predictors are built exactly as their own --predictor modes
-    build them; the ensemble only decides which answer leads.
-    """
-    ensemble_class = _import_attr("ensemble_geolocator", "EnsembleGeolocator")
-    default_threshold = _import_attr("ensemble_geolocator", "DEFAULT_TRUST_THRESHOLD")
-    return ensemble_class(
-        geoclip=_new_geolocator(),
-        retrieval=_new_retrieval_geolocator(gallery_path),
-        trust_threshold=default_threshold if trust_threshold is None else trust_threshold,
-    )
+    return geolocator_class(offline=True, use_stock_geoclip=use_stock_geoclip)
 
 
 def _new_plonk_geolocator(
@@ -545,42 +531,17 @@ class PredictorSpec:
     label: str
     build: Callable[[], Any]
     load_hint: str
-    # Enables the retrieval-only weak-similarity re-rank and the best-match
-    # caution in the CLI. None for GeoCLIP, whose scores have no similarity scale.
-    weak_similarity_threshold: float | None = None
 
 
 def _predictor_specs(args: argparse.Namespace) -> list[PredictorSpec]:
     """Return the predictors selected by --predictor, in report order."""
-    weak_threshold = _import_attr("aggregator", "DEFAULT_WEAK_SIMILARITY_THRESHOLD")
     geoclip = PredictorSpec(
         key="geoclip",
         label="GeoCLIP",
-        build=_new_geolocator,
+        build=lambda: _new_geolocator(use_stock_geoclip=args.use_stock_geoclip),
         load_hint=(
             "Install the requirements and pre-cache the GeoCLIP weights; "
             "the CLI does not access the network."
-        ),
-    )
-    gallery_path = str(Path(args.gallery_path).expanduser()) if args.gallery_path else ""
-    retrieval = PredictorSpec(
-        key="retrieval",
-        label="Retrieval",
-        build=lambda: _new_retrieval_geolocator(gallery_path),
-        load_hint=(
-            "Confirm --gallery-path points at a gallery version directory containing "
-            "gallery.faiss, metadata.parquet and manifest.json, and that faiss-cpu, "
-            "open-clip-torch and pyarrow are installed."
-        ),
-        weak_similarity_threshold=weak_threshold,
-    )
-    ensemble = PredictorSpec(
-        key="ensemble",
-        label="Ensemble (GeoCLIP + Retrieval)",
-        build=lambda: _new_ensemble_geolocator(gallery_path, args.ensemble_trust_threshold),
-        load_hint=(
-            "The ensemble needs both predictors: cached GeoCLIP weights and a "
-            "--gallery-path with gallery.faiss, metadata.parquet and manifest.json."
         ),
     )
     plonk_osv = PredictorSpec(
@@ -638,17 +599,13 @@ def _predictor_specs(args: argparse.Namespace) -> list[PredictorSpec]:
         return [cloud_hybrid]
     if args.predictor == "geoclip":
         return [geoclip]
-    if args.predictor == "retrieval":
-        return [retrieval]
-    if args.predictor == "ensemble":
-        return [ensemble]
     if args.predictor == "plonk-osv":
         return [plonk_osv]
     if args.predictor == "plonk-yfcc":
         return [plonk_yfcc]
     if args.predictor == "trusted":
         return [geoclip, plonk_osv, plonk_yfcc]
-    return [geoclip, retrieval]
+    return [geoclip]
 
 
 def _candidate_dict(candidate: Any) -> dict[str, float]:
@@ -720,6 +677,7 @@ def _process_image(
     max_predictions: int,
     spec: PredictorSpec,
     remove_text_enabled: bool = False,
+    crop_screen: str = "auto",
 ) -> dict[str, Any]:
     """Run image prediction, multi-hypothesis clustering, and place lookup."""
     load_image = _stage(
@@ -730,8 +688,34 @@ def _process_image(
     image = _stage(
         "Loading image",
         lambda: load_image(str(input_path)),
-        hint="Confirm the file is a readable image in a supported format (--list-formats).",
+        hint=(
+            f"'{input_path.name}' could not be decoded. The extension is recognised, so "
+            "the file itself is most likely truncated, corrupt, or actually a different "
+            "format than its name suggests. Run --list-formats for every accepted "
+            "extension."
+        ),
     )
+    # Cropping runs before text removal: once the frame is reduced to the
+    # screen's content, any remaining overlay text is the only text left, and
+    # the room's signage is already gone.
+    screen_crop_info: dict[str, Any] | None = None
+    if crop_screen != "off":
+        detect_and_crop = _stage(
+            "Loading screen-detection support",
+            lambda: _import_attr("screen_crop", "detect_and_crop"),
+            hint="Screen detection needs OpenCV; reinstall viewfinder/requirements.txt.",
+        )
+        crop_result = _stage(
+            "Checking whether the photo is of a screen",
+            lambda: detect_and_crop(image),
+            hint="Pass --crop-screen off to skip this check.",
+        )
+        screen_crop_info = crop_result.as_dict()
+        if crop_result.cropped:
+            image = crop_result.image
+        else:
+            logger.debug("screen crop: no crop applied (%s)", crop_result.reason)
+
     text_removal_info: dict[str, Any] | None = None
     if remove_text_enabled:
         remove_text = _stage(
@@ -776,7 +760,6 @@ def _process_image(
             [frame_prediction_class(candidates=candidates)],
             top_k=top_k,
             max_predictions=max_predictions,
-            weak_similarity_threshold=spec.weak_similarity_threshold,
         ),
     )
 
@@ -795,54 +778,17 @@ def _process_image(
 
     output = _serialize_aggregate(aggregate_result, places)
     output["predictor"] = spec.key
-    if spec.weak_similarity_threshold is not None:
-        output["weak_similarity_threshold"] = spec.weak_similarity_threshold
     output["processing"] = {
         "candidates_returned": len(candidates),
         "clusters_returned": len(aggregate_result.predictions),
     }
+    if screen_crop_info is not None:
+        output["processing"]["screen_crop"] = screen_crop_info
     if text_removal_info is not None:
         output["processing"]["text_removal"] = text_removal_info
-    _attach_gallery_details(output, geolocator, candidates)
     _attach_model_provenance(output, geolocator)
     _attach_evidence_assessment(output, geolocator)
     return output
-
-
-def _attach_gallery_details(
-    output: dict[str, Any],
-    geolocator: Any,
-    candidates: Any,
-) -> None:
-    """Record retrieval-specific provenance, when the predictor has any.
-
-    GeoCLIP has no reference gallery, so this is a no-op for it.
-    """
-    info = getattr(geolocator, "info", None)
-    if info is None or not hasattr(info, "as_dict"):
-        return
-    output["gallery"] = info.as_dict()
-    warning = info.warning()
-    if warning:
-        output["warning"] = warning
-
-    matched = _import_attr("retrieval_geolocator", "matched_image_ids")
-    if isinstance(candidates, list) and candidates and not isinstance(candidates[0], list):
-        pool = candidates
-    else:
-        pool = [candidate for frame in candidates for candidate in frame.candidates]
-    output["processing"]["gallery_images_matched"] = len(matched(pool))
-    output["processing"]["gallery_size"] = info.image_count
-
-    # Raw cosine similarity of the single best match. This is deliberately
-    # reported alongside the confidence score because the two answer different
-    # questions: confidence measures how well the returned neighbours agree with
-    # each other, while this measures how much the query actually resembles the
-    # closest reference photo. A tight cluster of poor matches yields high
-    # confidence and a low top similarity, which is the signature of a query
-    # whose true location is simply absent from the gallery.
-    if pool:
-        output["processing"]["top_similarity"] = round(max(c.score for c in pool), 4)
 
 
 def _attach_model_provenance(output: dict[str, Any], geolocator: Any) -> None:
@@ -888,7 +834,7 @@ def _process_video(
     max_duration_seconds: int,
     top_k: int,
     max_predictions: int,
-    quiet: bool,
+    progress_factory: ProgressFactory,
     spec: PredictorSpec,
 ) -> dict[str, Any]:
     """Run frame extraction, batched inference, aggregation, and place lookup."""
@@ -897,15 +843,29 @@ def _process_video(
         lambda: _import_attr("video_processor", "extract_frames"),
         hint="Install OpenCV and the other packages in viewfinder/requirements.txt.",
     )
-    frames, stats = _stage(
-        f"Sampling video at {fps:g} fps and filtering blurry frames",
-        lambda: extract_frames(str(input_path), fps=fps, max_frames=max_frames),
-        hint="Confirm that OpenCV can decode this video and that the file is not corrupt.",
-    )
+    with progress_factory("Sampling frames") as bar:
+        frames, stats = _stage(
+            f"Sampling video at {fps:g} fps and filtering blurry frames",
+            lambda: extract_frames(
+                str(input_path),
+                fps=fps,
+                max_frames=max_frames,
+                progress=bar.update,
+            ),
+            hint=(
+                "Confirm the file is a complete, readable video that OpenCV can decode. "
+                "A truncated download or an unsupported codec both look like this."
+            ),
+        )
     if not frames:
         raise PipelineError(
-            "Video frame extraction produced zero usable frames after blur filtering. "
-            "Try a clearer clip or a different sampling rate with --fps."
+            f"No usable frames survived filtering: all {stats.sampled} sampled frame(s) "
+            "were rejected as too blurry or as near-duplicates of each other.\n"
+            "  Try one of:\n"
+            "    --fps 2          sample more often (currently "
+            f"{fps:g}/second of video)\n"
+            "    --max-frames N   raise the retained-frame cap\n"
+            "  A static shot or a heavily motion-blurred clip is the usual cause."
         )
     logger.info(
         "Retained %d/%d sampled frames; starting batched inference",
@@ -918,11 +878,15 @@ def _process_video(
         spec.build,
         hint=spec.load_hint,
     )
-    predictions = _stage(
-        f"Processing {len(frames)} video frames with {spec.label}",
-        lambda: geolocator.predict_frames(frames, top_k=top_k, progress=not quiet),
-        hint="Try a lower --fps or verify that the selected Torch device has enough memory.",
-    )
+    with progress_factory(f"{spec.label} inference") as bar:
+        predictions = _stage(
+            f"Processing {len(frames)} video frames with {spec.label}",
+            lambda: geolocator.predict_frames(frames, top_k=top_k, progress=bar.update),
+            hint=(
+                "Try a lower --fps or --max-frames; the selected Torch device may not "
+                "have enough memory for this many frames."
+            ),
+        )
     if not predictions:
         raise PipelineError(f"{spec.label} inference produced no frame predictions.")
     if any(not prediction.candidates for prediction in predictions):
@@ -952,7 +916,6 @@ def _process_video(
             aggregation_predictions,
             top_k=top_k,
             max_predictions=max_predictions,
-            weak_similarity_threshold=spec.weak_similarity_threshold,
         ),
         hint="Use a clip with multiple clear views of the same general area.",
     )
@@ -983,10 +946,7 @@ def _process_video(
         processing["evidence_frames"] = len(evidence_predictions)
     output = _serialize_aggregate(aggregate_result, places)
     output["predictor"] = spec.key
-    if spec.weak_similarity_threshold is not None:
-        output["weak_similarity_threshold"] = spec.weak_similarity_threshold
     output["processing"] = processing
-    _attach_gallery_details(output, geolocator, predictions)
     _attach_model_provenance(output, geolocator)
     _attach_evidence_assessment(output, geolocator)
     return output
@@ -1018,10 +978,162 @@ PREDICTOR_TITLES = {
     "hybrid": "Fully local hybrid (OCR, GeoNames/OSM, Commons, visual abstention)",
     "cloud-hybrid": "Cloud evidence hybrid (optional Google services)",
     "geoclip": "GeoCLIP (learned location embeddings; no reference photos)",
-    "retrieval": "Retrieval (nearest match among our own scraped reference photos)",
     "plonk-osv": "PLONK OSV-5M (probabilistic street-view model)",
     "plonk-yfcc": "PLONK YFCC (probabilistic general-photo model)",
 }
+
+SUMMARY_WIDTH = 66
+
+
+def summarize(result: dict[str, Any]) -> dict[str, Any]:
+    """Reduce a full result to the handful of fields worth showing a human.
+
+    Shared by the CLI summary and the desktop GUI so the two can never drift.
+    Returns a dict with ``place``, ``latitude``, ``longitude``, ``confidence``
+    (may be None), ``predictor``, ``warning``
+    (may be None), and ``alternatives``.
+    """
+    predictor = result.get("predictor") or ", ".join(result.get("predictors", [])) or "unknown"
+    prediction = result.get("prediction")
+
+    # Three genuinely different outcomes, which must not be conflated:
+    #   single     -- one predictor, one answer;
+    #   comparison -- --predictor both, which deliberately produces no combined
+    #                 answer, and is not an abstention;
+    #   abstained  -- a predictor that could have answered declined to.
+    if "results" in result and "prediction" not in result:
+        mode = "comparison"
+    elif prediction is None:
+        mode = "abstained"
+    else:
+        mode = "single"
+
+    summary: dict[str, Any] = {
+        "mode": mode,
+        "predictor": predictor,
+        "predictor_title": PREDICTOR_TITLES.get(predictor, predictor),
+        "warning": result.get("warning"),
+        "place": None,
+        "latitude": None,
+        "longitude": None,
+        "confidence": None,
+        "alternatives": [],
+        "per_predictor": [],
+        "abstained": mode == "abstained",
+        "crop_note": None,
+    }
+
+    # An automatic crop changes what was actually analysed, so it is always
+    # reported rather than left to the JSON.
+    screen_crop = (result.get("processing") or {}).get("screen_crop") or {}
+    if screen_crop.get("cropped"):
+        summary["crop_note"] = (
+            "cropped to a detected screen covering "
+            f"{screen_crop['area_fraction'] * 100:.0f}% of the photo "
+            "(pass --crop-screen off to disable)"
+        )
+
+    if mode == "comparison":
+        for key, block in result["results"].items():
+            block_prediction = block.get("prediction")
+            if not block_prediction:
+                continue
+            summary["per_predictor"].append(
+                {
+                    "predictor": key,
+                    "place": _place_label(block_prediction),
+                    "latitude": block_prediction.get("latitude"),
+                    "longitude": block_prediction.get("longitude"),
+                    "confidence": block_prediction.get("confidence_percent"),
+                }
+            )
+        return summary
+
+    if prediction is None:
+        # A fail-closed abstention still has something to say: the rejected
+        # visual hypothesis, clearly labelled as not an answer.
+        hypotheses = result.get("visual_hypotheses") or []
+        if hypotheses:
+            best = hypotheses[0]
+            summary["place"] = _place_label(best)
+            summary["latitude"] = best.get("lat")
+            summary["longitude"] = best.get("lon")
+        return summary
+
+    summary["place"] = _place_label(prediction)
+    summary["latitude"] = prediction.get("latitude")
+    summary["longitude"] = prediction.get("longitude")
+    summary["confidence"] = prediction.get("confidence_percent")
+    summary["alternatives"] = [
+        {
+            "rank": alternative["rank"],
+            "place": _place_label(alternative),
+            "latitude": alternative["lat"],
+            "longitude": alternative["lon"],
+            "confidence": alternative["confidence"],
+        }
+        for alternative in result.get("predictions", [])[1:]
+    ]
+    return summary
+
+
+def _print_summary(result: dict[str, Any], stream: TextIO) -> None:
+    """Print the compact final summary, always, at every verbosity level.
+
+    Deliberately the last thing written, so a long run's answer is never buried
+    in stage logs. Under --quiet this goes to stderr, leaving the JSON on
+    stdout byte-for-byte as scripts already expect.
+    """
+    summary = summarize(result)
+    write = lambda text: print(text, file=stream)  # noqa: E731
+
+    write("")
+    write("=" * SUMMARY_WIDTH)
+    if summary["mode"] == "comparison":
+        write("  RESULT: separate predictors, not combined")
+    elif summary["abstained"]:
+        write("  RESULT: no location accepted (fail-closed abstention)")
+    else:
+        write(f"  RESULT: {summary['place']}")
+    write("=" * SUMMARY_WIDTH)
+
+    if summary["mode"] == "comparison":
+        for entry in summary["per_predictor"]:
+            confidence = (
+                f"{entry['confidence']:.1f}%" if entry["confidence"] is not None else "n/a"
+            )
+            write(f"  {entry['predictor']:<12} {entry['place']}")
+            write(
+                f"  {'':<12} {entry['latitude']:.6f}, {entry['longitude']:.6f}"
+                f"  ({confidence})"
+            )
+        write("=" * SUMMARY_WIDTH)
+        return
+
+    if summary["latitude"] is not None:
+        coordinates = f"{summary['latitude']:.6f}, {summary['longitude']:.6f}"
+        if summary["abstained"]:
+            # Name the rejected hypothesis, clearly marked as not an answer.
+            write(f"  Hypothesis   {summary['place']} — {coordinates}")
+            write("               (manual review only; not an accepted result)")
+        else:
+            write(f"  Coordinates  {coordinates}")
+    if summary["confidence"] is not None:
+        write(f"  Confidence   {summary['confidence']:.1f}%")
+    write(f"  Predictor    {summary['predictor']}")
+    if summary["crop_note"]:
+        write(f"  Preprocessing {summary['crop_note']}")
+    if summary["warning"]:
+        write(f"  ! {summary['warning']}")
+
+    alternatives = summary["alternatives"]
+    if alternatives:
+        shown = ", ".join(
+            f"{alternative['place']} ({alternative['confidence']:.0f}%)"
+            for alternative in alternatives[:3]
+        )
+        write(f"  Alternatives {shown}")
+    write("=" * SUMMARY_WIDTH)
 
 
 def _print_result(result: dict[str, Any], output_path: Path, *, quiet: bool) -> None:
@@ -1131,27 +1243,6 @@ def _print_single(result: dict[str, Any], output_path: Path, *, quiet: bool) -> 
     print(f"JSON output: {output_path}")
 
 
-def _best_match_note(block: dict[str, Any]) -> str:
-    """Annotate the confidence line with the retrieval primary's best match.
-
-    Retrieval confidence measures how well the returned neighbours agree, not
-    how good the match is. A high confidence built on a low best-match cosine
-    similarity is the tell that the query's true location may be absent from the
-    gallery, so that case is flagged inline on the primary result rather than
-    left buried in JSON. GeoCLIP has no similarity scale, so this is a no-op for
-    it (the threshold key is only written for retrieval).
-    """
-    threshold = block.get("weak_similarity_threshold")
-    if threshold is None:
-        return ""
-    top_similarity = block.get("prediction", {}).get("top_similarity")
-    if top_similarity is None:
-        return ""
-    if top_similarity < threshold:
-        return f" (best match: {top_similarity:.2f} — weak, treat with caution)"
-    return f" (best match: {top_similarity:.2f})"
-
-
 def _print_body(block: dict[str, Any]) -> None:
     """Print one predictor's primary prediction and its alternatives."""
     prediction = block["prediction"]
@@ -1166,7 +1257,7 @@ def _print_body(block: dict[str, Any]) -> None:
         radius_text = f"; channels agree within {radius:g} km" if radius is not None else ""
         print(f"Evidence:    {evidence['reliability_tier']}{radius_text}")
     elif "confidence_percent" in prediction:
-        print(f"Confidence:  {prediction['confidence_percent']:.1f}%{_best_match_note(block)}")
+        print(f"Confidence:  {prediction['confidence_percent']:.1f}%")
     else:
         print(f"Model score: {prediction['model_score']:.6g}")
     if "support_count" in prediction:
@@ -1207,113 +1298,34 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     args = parser.parse_args(argv)
+    _resolve_predictor_default(args)
     _configure_logging(verbose=args.verbose, quiet=args.quiet)
 
-    # Explicit flags win over the environment; leaving both unset keeps GeoCLIP's
-    # bundled gallery, so default behaviour is unchanged.
-    if args.gallery:
-        os.environ["VIEWFINDER_GALLERY"] = str(Path(args.gallery).expanduser())
-    if args.gallery_mode:
-        os.environ["VIEWFINDER_GALLERY_MODE"] = args.gallery_mode
+    progress_factory = _terminal_progress_factory(quiet=args.quiet, verbose=args.verbose)
 
     try:
-        source_metadata = _resolve_remote_source(args)
-        input_path, input_type, output_path = _validate_args(args)
-        # Predictor factories use args.input after validation. Normalize both the
-        # positional and legacy forms to the resolved local path.
-        args.input = str(input_path)
-        args.source = None
-        logger.debug("Input type: %s", input_type)
-        logger.debug("Input path: %s", input_path)
-        logger.debug("Output path: %s", output_path)
-
-        specs = _predictor_specs(args)
-        # Each predictor runs as a fully independent system over the same input.
-        # Their raw outputs stay separate. Trusted mode may compute a geographic
-        # consensus, but only an independently calibrated rule may emit it.
-        outputs: dict[str, dict[str, Any]] = {}
-        for spec in specs:
-            if input_type == "image":
-                outputs[spec.key] = _process_image(
-                    input_path,
-                    args.top_k,
-                    args.max_predictions,
-                    spec,
-                    remove_text_enabled=args.remove_text,
-                )
-            else:
-                outputs[spec.key] = _process_video(
-                    input_path,
-                    args.fps,
-                    args.max_frames,
-                    args.max_video_seconds,
-                    args.top_k,
-                    args.max_predictions,
-                    args.quiet,
-                    spec,
-                )
-
-        result = {
-            "input": str(input_path),
-            "input_type": input_type,
-            "source": source_metadata
-            or {
-                "kind": "local_file",
-                "path": str(input_path),
-            },
-        }
-        if len(specs) == 1:
-            # Single-predictor runs keep the original flat shape, so existing
-            # consumers of the JSON are unaffected.
-            result.update(outputs[specs[0].key])
-        else:
-            result["predictors"] = [spec.key for spec in specs]
-            result["results"] = outputs
-            if args.predictor == "trusted":
-                assess_trust = _stage(
-                    "Loading trust assessment support",
-                    lambda: _import_attr("trust", "assess_trust"),
-                )
-                assessment = _stage(
-                    "Checking cross-model agreement and held-out calibration",
-                    lambda: assess_trust(
-                        outputs,
-                        agreement_radius_km=args.trust_radius_km,
-                        required_success_rate=args.required_success_rate,
-                        success_definition_km=args.trust_success_km,
-                        calibration_path=args.trust_calibration,
-                    ),
-                )
-                consensus = assessment.get("consensus_prediction")
-                if consensus:
-                    reverse_geocode = _stage(
-                        "Loading offline place index for consensus",
-                        lambda: _import_attr("reverse_geocode", "reverse_geocode"),
-                        hint="Install reverse_geocoder from viewfinder/requirements.txt.",
-                    )
-                    place = _stage(
-                        "Finding nearest named place for consensus",
-                        lambda: reverse_geocode(
-                            consensus["latitude"],
-                            consensus["longitude"],
-                        ),
-                    )
-                    consensus.update(place)
-                result["trust_assessment"] = assessment
-                result["prediction"] = (
-                    consensus if assessment["automation_accepted"] else None
-                )
-        _stage(
-            "Writing JSON result",
-            lambda: _write_result(output_path, result),
-            hint="Check that the output directory exists and is writable.",
-        )
+        result, output_path = _execute(args, progress_factory=progress_factory)
     except UserInputError as exc:
         parser.exit(2, f"view-finder: error: {exc}\n")
     except PipelineError as exc:
         parser.exit(1, f"View Finder error: {exc}\n")
+    except KeyboardInterrupt:
+        parser.exit(130, "\nview-finder: interrupted\n")
+    except Exception as exc:  # pragma: no cover - last-resort guard
+        # Nothing below the CLI should surface a raw traceback to a user. Log
+        # the full detail under --verbose and show one actionable line.
+        logger.debug("Unhandled error", exc_info=True)
+        parser.exit(
+            1,
+            f"View Finder error: unexpected {exc.__class__.__name__}: {exc}\n"
+            "Re-run with --verbose for the full traceback.\n",
+        )
 
     _print_result(result, output_path, quiet=args.quiet)
+    # The summary is the last thing printed at every verbosity. Under --quiet it
+    # goes to stderr so stdout stays exactly the JSON that scripts parse.
+    _print_summary(result, sys.stderr if args.quiet else sys.stdout)
+
     if (
         args.predictor == "trusted"
         and args.require_trust
@@ -1327,6 +1339,168 @@ def run(argv: list[str] | None = None) -> int:
     ):
         return 3
     return 0
+
+
+def _resolve_predictor_default(args: argparse.Namespace) -> None:
+    """Fill in the default predictor and remember whether the user chose it.
+
+    An explicit choice is honoured exactly, including failing when its
+    prerequisites are missing. Only the *default* may quietly degrade.
+    """
+    args.predictor_is_explicit = args.predictor is not None
+    if args.predictor is None:
+        args.predictor = DEFAULT_PREDICTOR
+
+
+def _execute(
+    args: argparse.Namespace,
+    *,
+    progress_factory: ProgressFactory,
+) -> tuple[dict[str, Any], Path]:
+    """Run the pipeline for already-parsed arguments and return (result, path).
+
+    Split out of :func:`run` so the desktop GUI can drive the identical
+    orchestration with its own progress adapter, instead of duplicating it or
+    shelling out to the CLI.
+    """
+    # Explicit flags win over the environment; leaving both unset keeps GeoCLIP's
+    # bundled gallery, so default behaviour is unchanged.
+    if args.gallery:
+        os.environ["VIEWFINDER_GALLERY"] = str(Path(args.gallery).expanduser())
+    if args.gallery_mode:
+        os.environ["VIEWFINDER_GALLERY_MODE"] = args.gallery_mode
+
+    source_metadata = _resolve_remote_source(args)
+    input_path, input_type, output_path = _validate_args(args)
+    # Predictor factories use args.input after validation. Normalize both the
+    # positional and legacy forms to the resolved local path.
+    args.input = str(input_path)
+    args.source = None
+    logger.debug("Input type: %s", input_type)
+    logger.debug("Input path: %s", input_path)
+    logger.debug("Output path: %s", output_path)
+
+    specs = _predictor_specs(args)
+    # Each predictor runs as a fully independent system over the same input.
+    # Their raw outputs stay separate. Trusted mode may compute a geographic
+    # consensus, but only an independently calibrated rule may emit it.
+    outputs: dict[str, dict[str, Any]] = {}
+    for spec in specs:
+        if input_type == "image":
+            outputs[spec.key] = _process_image(
+                input_path,
+                args.top_k,
+                args.max_predictions,
+                spec,
+                remove_text_enabled=args.remove_text,
+                crop_screen=args.crop_screen,
+            )
+        else:
+            outputs[spec.key] = _process_video(
+                input_path,
+                args.fps,
+                args.max_frames,
+                args.max_video_seconds,
+                args.top_k,
+                args.max_predictions,
+                progress_factory,
+                spec,
+            )
+
+    result: dict[str, Any] = {
+        "input": str(input_path),
+        "input_type": input_type,
+        "source": source_metadata
+        or {
+            "kind": "local_file",
+            "path": str(input_path),
+        },
+    }
+    if len(specs) == 1:
+        # Single-predictor runs keep the original flat shape, so existing
+        # consumers of the JSON are unaffected.
+        result.update(outputs[specs[0].key])
+    else:
+        result["predictors"] = [spec.key for spec in specs]
+        result["results"] = outputs
+        if args.predictor == "trusted":
+            assess_trust = _stage(
+                "Loading trust assessment support",
+                lambda: _import_attr("trust", "assess_trust"),
+            )
+            assessment = _stage(
+                "Checking cross-model agreement and held-out calibration",
+                lambda: assess_trust(
+                    outputs,
+                    agreement_radius_km=args.trust_radius_km,
+                    required_success_rate=args.required_success_rate,
+                    success_definition_km=args.trust_success_km,
+                    calibration_path=args.trust_calibration,
+                ),
+            )
+            consensus = assessment.get("consensus_prediction")
+            if consensus:
+                reverse_geocode = _stage(
+                    "Loading offline place index for consensus",
+                    lambda: _import_attr("reverse_geocode", "reverse_geocode"),
+                    hint="Install reverse_geocoder from viewfinder/requirements.txt.",
+                )
+                place = _stage(
+                    "Finding nearest named place for consensus",
+                    lambda: reverse_geocode(
+                        consensus["latitude"],
+                        consensus["longitude"],
+                    ),
+                )
+                consensus.update(place)
+            result["trust_assessment"] = assessment
+            result["prediction"] = (
+                consensus if assessment["automation_accepted"] else None
+            )
+    _stage(
+        "Writing JSON result",
+        lambda: _write_result(output_path, result),
+        hint="Check that the output directory exists and is writable.",
+    )
+    return result, output_path
+
+
+def analyze(
+    source: str,
+    *,
+    predictor: str | None = None,
+    output: str | None = None,
+    extra_args: list[str] | None = None,
+    progress_factory: ProgressFactory | None = None,
+) -> tuple[dict[str, Any], Path]:
+    """Run the pipeline programmatically and return ``(result, output_path)``.
+
+    The public seam for non-CLI callers, principally :mod:`viewfinder.gui`.
+    Arguments are routed through the real parser rather than a parallel code
+    path, so defaults and validation behave identically to the command line.
+
+    Raises:
+        UserInputError: An invalid argument or unusable input file.
+        PipelineError: A stage failed; the message is user-presentable.
+    """
+    argv: list[str] = [source]
+    if predictor:
+        argv += ["--predictor", predictor]
+    if output:
+        argv += ["--output", output]
+    argv += extra_args or []
+
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:  # argparse exits on malformed input; translate it
+        raise UserInputError(f"invalid arguments: {' '.join(argv)}") from exc
+    _resolve_predictor_default(args)
+
+    def null_factory(label: str) -> TerminalProgressBar:
+        return TerminalProgressBar(label, enabled=False)
+
+    return _execute(args, progress_factory=progress_factory or null_factory)
 
 
 def main() -> None:

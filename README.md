@@ -4,12 +4,18 @@ View Finder is a local Python CLI that estimates where a travel or landscape
 photo or video was captured, by comparing scenery cues such as architecture,
 signage, vegetation, and terrain. It does not identify people.
 
-The default hybrid is fully local: PP-OCRv6 reads visible text in its supported
-50-language set, an offline
+Everything runs locally. Images never leave the computer; model weights and
+public reference data must be downloaded once during setup.
+
+The default predictor is `geoclip`, a visual model that will estimate a
+location for any photograph. The `hybrid` predictor remains available and is
+the fail-closed, evidence-first path:
+PP-OCRv6 reads visible text in its supported 50-language set, an offline
 GeoNames/OSM gazetteer resolves place names, and a local Wikimedia Commons
-OpenCLIP/FAISS gallery searches known landmarks. Images never leave the
-computer. Model weights and public reference data must be downloaded once
-during setup.
+OpenCLIP/FAISS gallery searches known landmarks. Choose it with
+`--predictor hybrid` whenever an unsupported guess is worse than no answer.
+
+There is also a small desktop GUI — see [Desktop GUI](#desktop-gui).
 
 ## Distinct predictors and trusted abstention
 
@@ -17,7 +23,7 @@ View Finder ships several geolocation systems. They are genuinely separate
 approaches, not variants of one another, and `--predictor` selects between
 them.
 
-### `hybrid` (default for images)
+### `hybrid` (fail-closed evidence path)
 
 This is the recommended, fail-closed path. It checks evidence in this order:
 
@@ -53,28 +59,15 @@ a coordinate present in its GPS gallery — the bundled gallery holds ~100k poin
 spread worldwide, so a remote area may have no nearby entry and the prediction
 gets snapped to the closest one that exists.
 
-### `retrieval`
-
-The query image is embedded with OpenCLIP and matched by nearest-neighbour
-search against the embeddings of **other real photographs** whose coordinates we
-know — reference photos scraped from Mapillary and indexed by this project's own
-`gallery-pipeline` ETL. A prediction means "this looks like that specific photo,
-which was taken here". This path is end-to-end ours: our scraped photos, our
-embeddings, our FAISS index.
-
-**The retrieval predictor is currently experimental.** A retrieval system can
-only ever propose a location it holds a reference photo for. The current
-galleries contain only a few hundred images covering a handful of regions, so a
-query from anywhere else *cannot* be answered correctly — the nearest neighbour
-will be whichever gallery photo looks most similar, and its coordinates will be
-confidently wrong. This is structural, and the confidence score cannot detect
-it: the score measures agreement among the returned neighbours, and neighbours
-drawn from a tiny gallery can agree strongly while all being wrong. The CLI
-prints a warning whenever the selected gallery holds fewer than 1000 photos.
-
-The two systems are never merged or averaged. With `--predictor both` they run
-independently and both results are reported side by side; where they disagree,
-that disagreement is the useful signal.
+View Finder loads the fine-tuned OSV-5M location encoder at
+`finetune/checkpoints/osv5m_reg_narrow_30/location_encoder_best_external.pth`
+by default. The CLIP vision tower and the rest of GeoCLIP remain stock. Use
+`--use-stock-geoclip` for an explicit stock-encoder comparison. The default
+fails clearly if the fine-tuned checkpoint is missing instead of silently
+changing models. Checkpoints are local training artifacts and remain gitignored,
+so a fresh clone must copy this winning checkpoint into that exact path (or set
+`VIEWFINDER_LOCATION_ENCODER` to its location) before using the fine-tuned
+default.
 
 ### `plonk-osv`, `plonk-yfcc`, and `trusted`
 
@@ -107,6 +100,100 @@ reliability guarantee. The 200 km trust rule achieved only 32.7% success among
 accepted images, so no runtime calibration was installed and `trusted` remains
 fail-closed. See [the benchmark report](benchmark-harness/REPORT.md).
 
+## Retrieval and ensemble: explored and shelved
+
+Two predictors were built, calibrated and tested, then removed from the active
+code path. They are **not deleted** — they live in `experiments/retrieval/`
+with their tests, and the reasoning is recorded here because the negative
+result is the useful part.
+
+### What was built
+
+`retrieval_geolocator.py` embedded a query with OpenCLIP and matched it by
+nearest neighbour against a FAISS index of real photographs whose coordinates
+were known — reference imagery scraped from Mapillary by this project's own
+`gallery-pipeline` ETL. A prediction meant "this looks like that specific
+photo, which was taken here". End-to-end ours: our photos, our embeddings, our
+index.
+
+`ensemble_geolocator.py` composed it with GeoCLIP. Neither model was modified;
+the ensemble only decided which answer led, based on retrieval's top-1 cosine
+similarity.
+
+### How the 0.825 threshold was calibrated
+
+The obvious gate — retrieval's own confidence score — is unusable. That score
+measures agreement among the returned neighbours, so a small gallery can
+produce strong agreement while every neighbour is wrong. An Alaska query
+scored 86.1% confidence at 0.523 similarity and named the wrong region.
+
+Raw top-1 cosine similarity does work, but only at a surprisingly high cut.
+Measured on 1000 globally diverse images the gallery does not cover (negative
+class) against images inside coverage that were not gallery entries (positive
+class):
+
+| population | min | median | p99 | max |
+|---|---|---|---|---|
+| not covered (n=1000) | 0.487 | 0.672 | 0.777 | **0.803** |
+| in coverage (n=24) | 0.632 | **0.851** | — | 0.962 |
+
+The populations separate only at the very top of the range. `0.825` sits above
+the observed out-of-coverage ceiling and below the in-coverage median. At that
+cut the external set contributed zero false accepts while 62.5% of in-coverage
+images routed to retrieval, taking their median error from 160.19 km to 0.36 km.
+
+A 0.6–0.65 cut looks reasonable a priori and would have been a disaster: it
+accepts 903 of those 1000 external images and pushes their median error from
+1292 km to 9787 km.
+
+Reproduce with `experiments/retrieval/calibrate_ensemble.py` and
+`pick_threshold.py`.
+
+### Why it was shelved
+
+**It worked in-gallery.** Inside coverage the ensemble cut median error from
+160.19 km to 0.36 km. That result stands.
+
+**It contributed nothing globally.** On the 1000-image external diverse set the
+ensemble was *identical* to GeoCLIP alone — 0 of 1000 images routed to
+retrieval. No harm, and no gain. Its value scaled with gallery coverage and
+nothing else, and the gallery covered 3314 photos against a planet.
+
+**The scaling limit is the real reason.** Recalibrating against a 1.9x larger
+gallery (v1 1719 → v2 3314 images) left the threshold unmoved, but only because
+two opposing shifts cancelled:
+
+| population | v1 (1719 img) | v2 (3314 img) |
+|---|---|---|
+| out-of-coverage max | 0.803 | 0.830 |
+| out-of-coverage mean | 0.668 | 0.704 |
+| in-coverage median | 0.851 | 0.863 |
+
+A larger gallery gives every query more chances at a spuriously similar photo,
+so **the false-accept ceiling rises with gallery size**. That is a property of
+size itself, not of which regions were added. Scaling the gallery toward global
+coverage therefore raises the very floor the trust threshold has to clear — the
+approach fights itself as it grows, and the threshold would need re-deriving on
+every significant expansion.
+
+A concrete illustration of the coverage limit: for a photograph of the Penang
+Second Bridge, the gallery held no image within 972 km, and zero in Malaysia at
+all. Retrieval cannot help outside its footprint, and expanding the footprint
+enough to matter is what the scaling limit blocks.
+
+### What remains
+
+`viewfinder/openclip_support.py` holds the OpenCLIP loading helpers this code
+introduced. They are still in the active path: the `hybrid` predictor's local
+Wikimedia Commons landmark matcher uses the same embedding-space conventions.
+
+The shelved tests run in place, with the CLI-level ones skipped since the
+behaviour they assert was removed:
+
+```bash
+python -m pytest experiments/retrieval/tests/
+```
+
 ## Requirements
 
 - Python 3.10 or newer
@@ -118,8 +205,8 @@ fail-closed. See [the benchmark report](benchmark-harness/REPORT.md).
 ## Quickstart from a fresh clone
 
 These are the exact, verified steps to go from a clean `git clone` to a working
-prediction. No Mapillary token is needed — the retrieval galleries are committed
-(index + metadata only), and model weights download once on first run.
+prediction. No Mapillary token is needed; model weights download once on first
+run.
 
 ```bash
 git clone https://github.com/its-arnavtech/View-Finder.git
@@ -133,10 +220,17 @@ python -m pip install -r viewfinder/requirements-social-video.txt
 python -m pip install --no-deps --no-build-isolation -e .
 ```
 
-The default image command is fail-closed:
+The default command runs GeoCLIP and needs no flags beyond the file:
 
 ```bash
-view-finder locate images/IMG_6790.png --require-evidence
+python -m viewfinder.main images/IMG_6790.png
+```
+
+For the fail-closed evidence path, which returns `prediction: null` rather than
+an unsupported guess, ask for it explicitly:
+
+```bash
+view-finder locate images/IMG_6790.png --predictor hybrid --require-evidence
 ```
 
 It can emit immediately when the original file has GPS metadata. Otherwise it
@@ -144,27 +238,10 @@ returns `prediction: null` unless online evidence is configured as described
 below. PLONK is preferred for manual visual hypotheses when its optional runtime
 is installed; the cached GeoCLIP model is used if PLONK is unavailable.
 
-Run the retrieval predictor against a committed gallery (works fully offline
-after the one-time OpenCLIP weight download):
-
-```bash
-python -m viewfinder.main --input images/IMG_6790.png --predictor retrieval \
-  --gallery-path gallery-pipeline/data/target-regions/gallery/v2
-```
-
-Or run both predictors side by side (GeoCLIP downloads its CLIP ViT-L/14 backbone
-once, ~1.7 GB):
-
-```bash
-python -m viewfinder.main --input images/IMG_6790.png --predictor both \
-  --gallery-path gallery-pipeline/data/target-regions/gallery/v2
-```
-
-Expected on a correct setup: retrieval reports **Silverdale / Belfair, Washington**
-for the bundled test images against the `v2` gallery, and GeoCLIP reports a
-California result — the same numbers this repo documents. The dependencies in
-`viewfinder/requirements.txt` are pinned to the exact versions these results were
-produced with, so a fresh clone reproduces them.
+Expected on a correct setup: GeoCLIP reports a California result for the bundled
+test image. The dependencies in `viewfinder/requirements.txt` are pinned to the
+exact versions these results were produced with, so a fresh clone reproduces
+them.
 
 ## Installation
 
@@ -187,10 +264,10 @@ After that setup step, runs do not make network calls unless
 `--online-evidence` is explicitly supplied. If a visual model is not cached,
 the CLI exits with an actionable error instead of downloading it silently.
 
-`viewfinder/requirements.txt` already includes the retrieval predictor's
-dependencies (`faiss-cpu`, `open-clip-torch`, `torchvision`, `pyarrow`). To use
-`--predictor retrieval`, also cache its OpenCLIP checkpoint once and point it at
-a gallery (see [Galleries](#galleries)):
+`viewfinder/requirements.txt` includes `faiss-cpu`, `open-clip-torch`,
+`torchvision` and `pyarrow`. These are still required: the `hybrid` predictor's
+local Commons landmark matcher uses OpenCLIP and FAISS. Cache its checkpoint
+once with:
 
 ```powershell
 python -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')"
@@ -263,16 +340,13 @@ See [DATASETS.md](DATASETS.md) for dataset provenance and licensing notes.
 
 ### Galleries
 
-The retrieval predictor searches a FAISS gallery built by `gallery-pipeline`.
-Prebuilt galleries are checked into `gallery-pipeline/data/*/gallery/vN/` (the
-FAISS index + metadata + manifest — not the raw source images, which are not
-required at query time), so retrieval reproduces the documented results out of
-the box:
+The `hybrid` predictor's landmark matcher searches a local FAISS gallery of
+Wikimedia Commons imagery, built by `gallery-pipeline`. Prebuilt galleries are
+checked into `gallery-pipeline/data/*/gallery/vN/` (the FAISS index + metadata +
+manifest — not the raw source images, which are not required at query time).
 
-```powershell
-python -m viewfinder.main --input .\images\IMG_6790.png --predictor both `
-  --gallery-path .\gallery-pipeline\data\target-regions\gallery\v2
-```
+The now-shelved retrieval predictor used the same galleries; see
+[Retrieval and ensemble](#retrieval-and-ensemble-explored-and-shelved).
 
 To build your own gallery (denser or elsewhere), run the pipeline — see
 `gallery-pipeline/README.md`. That step needs a Mapillary token; querying an
@@ -326,28 +400,15 @@ Produce only the final prediction on stdout (as one JSON line):
 view-finder locate .\clips\panorama.mp4 --predictor geoclip --quiet
 ```
 
-Use the retrieval predictor against a gallery built by `gallery-pipeline`:
-
-```powershell
-python -m viewfinder.main --input .\photos\redwoods.jpg --predictor retrieval --gallery-path .\gallery-pipeline\data\target-regions\gallery\v1
-```
-
-Run both systems and compare them side by side:
-
-```powershell
-python -m viewfinder.main --input .\photos\redwoods.jpg --predictor both --gallery-path .\gallery-pipeline\data\target-regions\gallery\v1
-```
-
 CLI options:
 
 ```text
 SOURCE             Local image/video path or public Instagram/TikTok URL
---predictor NAME   hybrid (default) | cloud-hybrid | geoclip | retrieval |
-                   both | plonk-osv | plonk-yfcc | trusted
+--predictor NAME   geoclip (default) | hybrid | cloud-hybrid | plonk-osv |
+                   plonk-yfcc | trusted
 --local-data PATH  Local evidence root; default ./local-data
 --online-evidence  cloud-hybrid only: use Cloud Vision + Google Places
 --require-evidence Hybrid modes: exit 3 unless evidence authorizes automation
---gallery-path PATH  Gallery version directory; required for retrieval/both
 --plonk-samples INT  Posterior samples per PLONK model; default 32
 --trust-radius-km N  Maximum pairwise consensus spread; default 200
 --required-success-rate N  Required held-out Wilson lower bound; default .95
@@ -360,34 +421,290 @@ SOURCE             Local image/video path or public Instagram/TikTok URL
 --max-video-seconds INT  Download/video duration cap; default 600
 --max-download-mb INT  Social download size cap; default 500
 --top-k INT        Ranked candidates retained/reported; default 5
-                   (also the k for the retrieval nearest-neighbour search)
 --max-predictions INT  Distinct location clusters returned; default 5
 --output PATH      JSON path; defaults beside the input file
 --gallery PATH     Optional custom GPS gallery for GeoCLIP (see below)
 --gallery-mode M   augment (default) | replace, for --gallery
+--crop-screen M    auto (default) | off. Crop to a detected display/framed
+                   picture; auto acts only on a confident detection
 --verbose, -v      Debug logging for pipeline stages
---quiet, -q        No progress logging; print only the final prediction
+--quiet, -q        Print only the machine-readable prediction on stdout
 ```
 
-`--gallery-path` must point at a gallery **version** directory produced by
-`gallery-pipeline`'s load stage, containing `gallery.faiss`,
-`metadata.parquet`, and `manifest.json`. Omitting it with
-`--predictor retrieval` or `--predictor both` is an error (exit `2`).
+### Photos of screens (`--crop-screen`)
 
-The query encoder is read from the gallery's own `manifest.json` rather than
-hardcoded, so a gallery is always searched with the model that built it. A
-mismatch between query and gallery embedding spaces would make retrieval
-meaningless, so a gallery built with a non-OpenCLIP encoder is rejected
-outright.
+A photo *of a display* is not a photo of a place. Handed one, the pipeline is
+asked "where is this laptop sitting in a room", and the scene on screen reaches
+the model at roughly a hundred pixels of vertical resolution after CLIP's
+`Resize(224) + CenterCrop(224)` — alongside the bezel, the desk, the clock and
+the OS's news tiles.
+
+`--crop-screen auto` (the default) detects a display or framed picture and crops
+to its content, perspective-correcting it on the way. Measured on a controlled
+test — a synthetic lock-screen photo whose wallpaper is a known image, so the
+right answer is known:
+
+| run | prediction | error vs. the wallpaper alone |
+|---|---|---|
+| screen photo, `--crop-screen off` | A Coruña, Spain | 7393 km |
+| screen photo, `--crop-screen auto` | Lawrence, Kansas | 445 km |
+
+**Auto mode only acts on a confident detection.** Cropping an ordinary
+photograph would discard most of the frame on a false positive, so every gate in
+`viewfinder/screen_crop.py` must pass: area, aspect ratio, interior/exterior
+contrast, rectangularity, corner squareness, opposite-side equality, and — the
+gate that does most of the work — *edge support*, the fraction of the quad's
+perimeter that lies on a real detected boundary. A bezel scores near 1.0; four
+scenery features that happen to line up do not.
+
+The first four gates alone cropped 18 of 400 real photographs (4.5%). With the
+full set that is **4 of 900 (0.44%)**, while both a real and a synthetic screen
+photo still crop. Re-run that measurement if you touch any threshold: loosening
+one to make a real photograph detect at all pushed the rate back to 2.5% until
+the aspect, area and angle gates were tightened to compensate.
+
+### What cropping does not fix
+
+Cropping fixes the input, not the model. On a real Windows lock-screen photo of
+the Penang Second Bridge the crop succeeds and the prediction does not move:
+
+| run | prediction | error |
+|---|---|---|
+| `--crop-screen off` | Mountain View, California | 13549 km |
+| `--crop-screen auto` | Mountain View, California | 13549 km |
+| `--crop-screen auto --remove-text` | Pingtung, Taiwan | 2903 km |
+
+The overlaid clock and date dominate whatever is left after cropping — removing
+the tile strip alone moves the answer by 47 km, removing the clock and date
+moves it 10,000 km. And even fully cleaned the answer is East Asia, not
+Malaysia, because **the gallery holds no photograph within 972 km of Penang**
+(zero entries in Malaysia at all), and GeoCLIP does not know this bridge. For a
+location like this the fix is training data or gallery coverage, not
+preprocessing. This measurement was taken while the retrieval/ensemble
+predictor was still active; it is one of the results that led to shelving it.
+
+When a crop happens it is reported in the summary and recorded under
+`processing.screen_crop` in the JSON, so it is never a silent change:
+
+```text
+  Preprocessing cropped to a detected screen covering 74% of the photo
+```
+
+Two limits worth knowing: this applies to still images, not video frames, and
+cropping fixes the *input* — the scene still has to be something the model or
+the gallery actually knows. Compose it with `--remove-text` to also inpaint
+overlay text left inside the cropped region.
+
+### Progress and the result summary
+
+Video runs draw a progress bar for frame sampling and for model inference. Bars
+are written to stderr and only when stderr is a terminal, so piped output and
+log files stay clean. They are suppressed under `--verbose`, where the per-batch
+debug lines already report progress.
+
+A compact summary is always the last thing printed, at every verbosity level, so
+a long run's answer is never buried in stage logs:
+
+```text
+==================================================================
+  RESULT: Erlands Point-Kitsap Lake, Washington, US
+==================================================================
+  Coordinates  47.523348, -122.745066
+  Confidence   74.3%
+  Predictor    geoclip
+  Alternatives Mill Valley, California, US (37%)
+==================================================================
+```
+
+Under `--quiet` the summary goes to **stderr**, leaving
+stdout as exactly the JSON that scripts already parse:
+
+```bash
+python -m viewfinder.main photo.jpg --quiet > result.json
+```
+
+## Desktop GUI
+
+A small Tkinter window covers the common case — pick a file, pick a predictor,
+read the answer — without a terminal. Tkinter ships with Python, so there is
+nothing extra to install:
+
+```bash
+python viewfinder/gui.py
+```
+
+It also runs as a module:
+
+```bash
+python -m viewfinder.gui
+```
+
+The window offers a file picker, radio buttons for `geoclip` (default) and
+`hybrid`, a Run button, and a progress bar that switches from indeterminate to a
+real percentage once the pipeline knows the frame count. The results panel shows
+the place name, coordinates, confidence, and the ranked alternatives, plus the
+path of the JSON written beside the input file (the same default the CLI uses).
+
+The GUI imports `viewfinder.main` and calls the same orchestration the CLI
+calls — it does not shell out — so the predictor default, screen-crop step, and
+error messages are identical in both. Inference runs on a worker thread, so the
+window stays responsive; failures are shown in the results panel rather than
+raised as a traceback into a console nobody is watching.
+
+The landmark gallery's query encoder is read from its own `manifest.json`
+rather than hardcoded, so a gallery is always searched with the model that built
+it. A mismatch between query and gallery embedding spaces would make the search
+meaningless, so a gallery built with a non-OpenCLIP encoder is rejected outright.
 
 Note `--gallery`/`--gallery-mode` are a separate, GeoCLIP-only feature: they
 extend GeoCLIP's *coordinate* pool with coordinates harvested by the pipeline.
-That is unrelated to `--predictor retrieval`, which does not use GeoCLIP at all.
 
 Supported formats depend on the installed Pillow/OpenCV decoders. Run
 `view-finder formats` for the exact image and video
 extensions available in the current environment. Format detection is
 extension-based and case-insensitive.
+
+## 3D World Engine
+
+`view-finder world` turns a single photo into an explorable 3D world you can
+move through in a browser, including on a phone. It estimates depth locally
+(Depth Anything V2 Small, Apache-2.0), builds a layered mesh (foreground,
+the hidden background behind silhouettes, sky, dome and ground) and exports a
+standard `.glb` with a dependency-free WebGL viewer.
+
+```bash
+view-finder world setup                          # once: download the depth model (~100 MB)
+view-finder world build photo.jpg --html         # photo_world.glb/.json/.html
+view-finder world serve --host 0.0.0.0           # open the printed link on your phone
+```
+
+The phone path resizes photos on the device before upload and protects the
+LAN server with an access token. Everything stays on your network. See
+[docs/3d-engine/README.md](docs/3d-engine/README.md) for usage and
+[docs/3d-engine/ARCHITECTURE.md](docs/3d-engine/ARCHITECTURE.md) for how it
+works.
+
+## Discord bot
+
+`viewfinder/discord_bot.py` is a standalone, always-on Discord process. It is
+not imported by, merged with, or dependent on the News bot. Use a **new Discord
+application and token** so the two bots retain separate identities.
+
+1. Open [Discord Developer Portal](https://discord.com/developers/applications),
+   choose **New Application**, give it a View Finder-specific name, and add a bot
+   on the **Bot** page.
+2. On that Bot page, enable **Message Content Intent**. Attachments can arrive
+   without it, but URL text cannot.
+3. Reset/copy the bot token. Copy `.env.example` to `.env`, then set
+   `DISCORD_BOT_TOKEN=...` there. `.env` is gitignored; the token is a password
+   and must never be committed or pasted into logs.
+4. Under **OAuth2 -> URL Generator**, select the `bot` scope and grant **View
+   Channels**, **Send Messages**, and **Read Message History**. Open the generated
+   URL to invite this new bot to a server. Sharing a server also lets you DM it
+   when your Discord privacy settings permit DMs from server members.
+5. Install and run it from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r viewfinder\requirements-discord.txt
+.\.venv\Scripts\python.exe -m viewfinder.discord_bot
+```
+
+Keep that process running for the bot to respond. In either a DM or an accessible
+channel, send an image/video attachment or a recognized media URL. The bot first
+replies that it is processing, queues concurrent requests to stay within GPU
+memory, then edits the reply with the location, coordinates, confidence, and top
+alternatives. Link downloads use `yt-dlp`, are capped at 200 MB and 10 minutes by
+default, and report private/login-gated/rate-limited Instagram failures plainly.
+The limits can be changed with the variables documented in `.env.example`.
+
+## Discord bot
+
+A standalone bot that geolocates any image or video you send it. Send a photo
+as an attachment, or paste a link, in a DM or in any channel the bot can see;
+it replies with the place name, coordinates, a map link, confidence, and the
+top alternatives.
+
+It is a **separate process with its own bot identity**. If you already run
+another bot, this one needs its own application and its own token — two
+processes cannot share a token, and Discord will disconnect both if they try.
+
+### 1. Create the application
+
+1. Go to <https://discord.com/developers/applications> and click
+   **New Application**. Name it whatever you like (e.g. `View Finder`).
+2. Open the **Bot** tab and click **Add Bot**.
+3. Under **Privileged Gateway Intents**, enable **Message Content Intent**.
+   This is required: without it the bot still sees attachments, but reads every
+   message body as empty, so pasted links silently stop working.
+4. Click **Reset Token**, then **Copy**. This is the only time it is shown.
+
+### 2. Put the token in `.env`
+
+```bash
+cp .env.example .env
+```
+
+Then set the token in `.env`:
+
+```
+DISCORD_BOT_TOKEN=your-token-here
+```
+
+`.env` is gitignored. Never commit a real token — anyone holding it can act as
+your bot. The bot never prints or logs it, including in error messages.
+
+### 3. Invite it
+
+In the developer portal, open **OAuth2 → URL Generator**:
+
+- **Scopes:** `bot`
+- **Bot Permissions:** `Send Messages`, `Read Message History`,
+  `Attach Files`, and `View Channel`
+
+Open the generated URL and pick a server. For DMs, you and the bot only need to
+share one server — you do not need to invite it to a channel specifically.
+
+### 4. Install and run
+
+```bash
+python -m pip install -r viewfinder/requirements-discord.txt
+python viewfinder/discord_bot.py
+```
+
+**It only responds while it is running.** There is no hosted component; close
+the terminal and the bot goes offline. Keep it in its own terminal, or register
+it as a background service.
+
+### What it does and does not handle
+
+| input | behaviour |
+|---|---|
+| Image or video attachment | Downloaded and predicted |
+| Instagram / TikTok / YouTube / Twitter / Reddit / Vimeo link | Fetched with yt-dlp, then predicted |
+| Direct link ending in a media extension | Fetched and predicted |
+| Any other link, or plain text | Ignored, so the bot stays quiet in a busy channel |
+| Message from another bot | Ignored, so two bots cannot talk to each other forever |
+
+Safeguards: attachments are capped at 50 MB and link downloads at 200 MB and
+600 seconds (all configurable in `.env`), a "working on it" reply goes out
+immediately since inference takes real time, and predictions are serialised —
+one GeoCLIP instance nearly fills the GPU, so simultaneous messages queue
+rather than loading a second copy.
+
+**Instagram links fail unpredictably**, and not because of anything you did:
+Instagram blocks anonymous downloads, rate-limits, and periodically breaks
+yt-dlp's extractor. The bot says so plainly and suggests downloading the video
+and attaching it directly, which always works. It never replies with a stack
+trace or goes silent.
+
+### Relationship to the news bot
+
+This mirrors the conventions of the separate news bot — `DISCORD_BOT_TOKEN`
+loaded from `.env` via python-dotenv, a token that is never logged — but shares
+no code and no identity with it. One difference: the news bot calls Discord's
+REST API directly and polls, because it only ever pushes a digest on a
+schedule. This bot has to react to arbitrary incoming messages, so it uses
+discord.py's gateway client instead.
 
 ## Pipeline
 
@@ -396,11 +713,10 @@ coordinates from the selected predictor, geographically clusters the top-k
 results, independently scores each distinct location hypothesis, and
 reverse-geocodes every returned cluster.
 
-Both predictors share the clustering, confidence scoring, and reverse-geocoding
+Every predictor shares the clustering, confidence scoring, and reverse-geocoding
 stages, so they produce the same shape of ranked result. Scores are normalised
-per frame against that frame's best candidate, which is what lets GeoCLIP's
-softmax probabilities and retrieval's cosine similarities both flow through the
-same scoring code unchanged.
+per frame against that frame's best candidate, which is what lets differently
+scaled model outputs flow through the same scoring code unchanged.
 
 For a video, it samples at the requested rate, caps retained frames, rejects
 blurry and near-duplicate frames, and runs the selected predictor. The local
@@ -495,21 +811,12 @@ averaged across the two systems:
 {
   "input": "C:\\photos\\redwoods.jpg",
   "input_type": "image",
-  "predictors": ["geoclip", "retrieval"],
+  "predictors": ["geoclip", "plonk-osv", "plonk-yfcc"],
   "results": {
-    "geoclip": { "predictor": "geoclip", "prediction": {}, "predictions": [] },
-    "retrieval": {
-      "predictor": "retrieval",
-      "prediction": {},
-      "predictions": [],
-      "warning": "EXPERIMENTAL: the retrieval gallery holds only 299 reference photos ...",
-      "gallery": {
-        "version": 1,
-        "image_count": 299,
-        "embedding_model": "open_clip:ViT-B-32:laion2b_s34b_b79k",
-        "experimental": true
-      },
-      "processing": { "gallery_images_matched": 5, "gallery_size": 299 }
+    "geoclip":    { "predictor": "geoclip",    "prediction": {}, "predictions": [] },
+    "plonk-osv":  { "predictor": "plonk-osv",  "prediction": {}, "predictions": [] },
+    "plonk-yfcc": { "predictor": "plonk-yfcc", "prediction": {}, "predictions": [] }
+  }
     }
   }
 }

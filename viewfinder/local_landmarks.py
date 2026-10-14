@@ -13,7 +13,7 @@ from typing import Any, Sequence
 import numpy as np
 from PIL import Image
 
-from .retrieval_geolocator import _load_model, _parse_model_spec, resolve_device
+from .openclip_support import load_model, parse_model_spec, resolve_device
 
 
 LOGGER = logging.getLogger(__name__)
@@ -101,9 +101,9 @@ class LandmarkRetriever:
             table = pq.read_table(path / "metadata.parquet")
         except Exception as exc:
             raise LandmarkGalleryError(f"Could not load landmark gallery {path}: {exc}") from exc
-        model_name, pretrained = _parse_model_spec(manifest["embedding_model"])
+        model_name, pretrained = parse_model_spec(manifest["embedding_model"])
         self.device = resolve_device(device)
-        self.model, self.preprocess = _load_model(model_name, pretrained, self.device)
+        self.model, self.preprocess = load_model(model_name, pretrained, self.device)
         self.path = path
         self.manifest = manifest
         self.rows = table.to_pylist()

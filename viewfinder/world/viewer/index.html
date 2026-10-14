@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#101418">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>View Finder World</title>
+<link rel="stylesheet" href="static/viewer.css">
+</head>
+<body>
+<canvas id="world" aria-label="3D world built from your photo"></canvas>
+
+<section id="home" class="panel" hidden>
+  <h1>Step into a photo</h1>
+  <p class="lede">Pick or take a photo. The engine on your computer estimates its depth and builds a 3D world you can move through.</p>
+  <label class="primary" for="photo">
+    <span>Take or choose a photo</span>
+    <input id="photo" type="file" accept="image/*">
+  </label>
+  <label class="field">Quality
+    <select id="quality">
+      <option id="quality-auto" value="auto">Auto</option>
+      <option value="mobile">Mobile (lighter)</option>
+      <option value="desktop">Desktop</option>
+      <option value="high">High (large download)</option>
+    </select>
+  </label>
+  <p id="error" class="error" role="alert" hidden></p>
+  <p class="fine">Your photo is processed on your own computer and never leaves your network.</p>
+</section>
+
+<section id="busy" class="panel" hidden aria-live="polite">
+  <div class="spinner" aria-hidden="true"></div>
+  <p id="busy-stage">Working…</p>
+  <div class="track"><div id="busy-bar" class="bar"></div></div>
+</section>
+
+<div id="hint" class="hint" hidden></div>
+<div id="debug" class="debug" hidden></div>
+
+<nav id="toolbar" class="toolbar" hidden>
+  <button id="btn-new" type="button">New photo</button>
+  <button id="btn-reset" type="button">Reset</button>
+  <button id="btn-mode" type="button">Orbit</button>
+  <button id="btn-roam" type="button" aria-pressed="false">Free roam</button>
+  <button id="btn-tilt" type="button" aria-pressed="false" hidden>Tilt</button>
+  <button id="btn-download" type="button">.glb</button>
+</nav>
+
+<script src="static/glb.js"></script>
+<script src="static/renderer.js"></script>
+<script src="static/controls.js"></script>
+<script src="static/app.js"></script>
+</body>
+</html>

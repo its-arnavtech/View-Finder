@@ -19,7 +19,7 @@ import pandas as pd
 
 sys.path.insert(0, r"C:\View-Finder")
 
-from viewfinder.ensemble_geolocator import DEFAULT_MENTION_FLOOR, DEFAULT_TRUST_THRESHOLD
+from ensemble_geolocator import DEFAULT_MENTION_FLOOR, DEFAULT_TRUST_THRESHOLD
 
 THRESHOLDS_KM = (1, 25, 200, 750, 2500)
 
@@ -45,9 +45,9 @@ def parity_check(rows: pd.DataFrame, gallery: str, sample: int, threshold: float
     """Confirm the real EnsembleGeolocator routes the way this script assumes."""
     from PIL import Image
 
-    from viewfinder.ensemble_geolocator import EnsembleGeolocator
+    from ensemble_geolocator import EnsembleGeolocator
     from viewfinder.geolocator import GeoLocator
-    from viewfinder.retrieval_geolocator import RetrievalGeolocator
+    from retrieval_geolocator import RetrievalGeolocator
 
     subset = rows.sample(n=min(sample, len(rows)), random_state=7).reset_index(drop=True)
     print(f"\nparity check on {len(subset)} images (real EnsembleGeolocator vs offline reconstruction)...")
