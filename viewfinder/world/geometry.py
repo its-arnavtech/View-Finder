@@ -133,7 +133,7 @@ def navigation_bounds(depth: np.ndarray, valid: np.ndarray) -> dict[str, list[fl
     """
     values = depth[valid]
     near_field = float(np.percentile(values, 20)) if values.size else 1.0
-    half = [max(0.05, near_field * k) for k in (0.35, 0.2, 0.6)]
+    half = [max(0.05, near_field * k) for k in (0.3, 0.15, 0.4)]
     return {
         "center": [0.0, 0.0, 0.0],
         "half_extents": [round(h, 4) for h in half],
@@ -192,8 +192,10 @@ def sharpen_depth_edges(
     read this one sharpened map.
 
     1. A pixel is on a ramp when its gradient is steeper than
-       ``jump / stride`` (the grid's edge test, per pixel). Ground planes
-       never qualify.
+       ``jump / stride`` (the grid's edge test, per pixel) *and* the local
+       depth range stops growing when the window doubles. That is a step
+       between two plateaus, not a slope. A steep near floor passes the
+       first test but fails the second, so it is never terraced.
     2. Each ramp pixel is assigned to the near or the far side by *colour*:
        whichever local mean colour, of the confidently near or the
        confidently far pixels around it, it is closer to. Depth decides only
@@ -219,7 +221,14 @@ def sharpen_depth_edges(
     near = cv2.dilate(values, window)
     far = cv2.erode(values, window)
     spread = near - far
-    snap = ramp & (spread > jump)
+    # Occlusion or slope? Across an occlusion the two plateaus are flat, so
+    # the local range barely grows when the window doubles. Across a slope
+    # (a floor close to the camera) it keeps growing. Snapping a slope cut it
+    # into terraces whose every step became a silhouette.
+    wide = np.ones((2 * size + 1, 2 * size + 1), np.uint8)
+    wide_spread = cv2.dilate(values, wide) - cv2.erode(values, wide)
+    step_like = wide_spread < 1.35 * spread
+    snap = ramp & (spread > jump) & step_like
     if not snap.any():
         return values
 

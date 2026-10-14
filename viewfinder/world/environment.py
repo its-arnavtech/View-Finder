@@ -73,7 +73,9 @@ def _progressive_blur(image: np.ndarray, distance: np.ndarray, sigmas: tuple[flo
     that grows with ``distance`` (0..1, broadcastable to the image)."""
     levels = [image.astype(np.float32)]
     levels += [_box_gaussian(levels[0], sigma, axis) for sigma in sigmas]
-    position = np.broadcast_to(np.clip(distance, 0.0, 1.0) * (len(levels) - 1), image.shape[:2])
+    # sqrt: the blur ramps up quickly right at the border, where stretch
+    # streaks are most visible.
+    position = np.broadcast_to(np.sqrt(np.clip(distance, 0.0, 1.0)) * (len(levels) - 1), image.shape[:2])
     # Linear interpolation between the two nearest levels (tent weights).
     out = np.zeros_like(levels[0])
     for index, level in enumerate(levels):
@@ -184,7 +186,7 @@ def extend_frame(
     side_share = (dx[None, :] / np.maximum(dx[None, :] + dy[:, None], 1e-6))[..., None]
     canvas = sides * side_share + ends * (1.0 - side_share)
     if fade_to is not None:
-        fade_weight = 0.9 * weight**2
+        fade_weight = 0.95 * weight
         canvas = canvas * (1.0 - fade_weight) + fade_to.astype(np.float32) * fade_weight
     canvas_rgb = np.clip(canvas, 0, 255).astype(np.uint8)
     # The original frame is copied back exactly: the blends above are no-ops

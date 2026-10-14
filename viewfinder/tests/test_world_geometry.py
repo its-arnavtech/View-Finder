@@ -154,4 +154,4 @@ def test_navigation_bounds_scale_with_near_field():
     depth = np.full((10, 10), 4.0, np.float32)
     bounds = navigation_bounds(depth, np.ones_like(depth, bool))
     assert bounds["near_field_depth"] == pytest.approx(4.0)
-    assert bounds["half_extents"] == pytest.approx([1.4, 0.8, 2.4])
+    assert bounds["half_extents"] == pytest.approx([1.2, 0.6, 1.6])
