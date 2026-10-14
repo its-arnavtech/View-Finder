@@ -65,21 +65,28 @@ def test_background_colour_flows_from_the_far_side():
     assert unknown[:, 10:14].all()
     assert not sources[:, 10:18].any()  # the occluder's rim never donates colour
     filled = propagate_background(rgb, unknown, sources)
-    assert (filled[:, 10:14, 1] == 200).all() and (filled[:, 10:14, 0] == 0).all()
+    hidden = filled[:, 10:14].astype(int)
+    assert (hidden[..., 1] > 150).all() and (hidden[..., 0] < 60).all()  # background green, not occluder red
     assert (filled[:, 20:, 0] == 200).all()  # interior untouched
 
 
-def test_fill_copies_the_nearest_source_colour():
-    """Pins the raster-order label convention of distanceTransformWithLabels."""
-    rgb = np.zeros((9, 9, 3), np.uint8)
-    sources = np.zeros((9, 9), bool)
-    for (y, x), color in {(0, 0): 10, (0, 8): 20, (8, 0): 30, (8, 8): 40}.items():
-        sources[y, x] = True
-        rgb[y, x] = color
-    unknown = ~sources
-    filled = propagate_background(rgb, unknown, sources)
-    assert filled[1, 1, 0] == 10 and filled[1, 7, 0] == 20
-    assert filled[7, 1, 0] == 30 and filled[7, 7, 0] == 40
+def test_push_pull_fill_is_smooth_and_stays_within_the_sources():
+    """No streaks: a hole between two colours becomes a gradient, and the
+    fill never invents colours outside the sources' range."""
+    rgb = np.zeros((40, 80, 3), np.uint8)
+    rgb[:, :20] = (200, 40, 40)
+    rgb[:, 60:] = (40, 40, 200)
+    sources = np.zeros((40, 80), bool)
+    sources[:, :20] = sources[:, 60:] = True
+    filled = propagate_background(rgb, ~sources, sources).astype(int)
+    red = filled[20, 20:60, 0]
+    assert red[0] > red[-1] and np.all(np.diff(red) <= 2)  # monotone fade, no stripes
+    assert filled.min() >= 40 - 1 and filled.max() <= 200 + 1
+    # A single source colour fills exactly.
+    flat = np.full((10, 10, 3), 90, np.uint8)
+    only = np.zeros((10, 10), bool)
+    only[0] = True
+    assert (propagate_background(flat, ~only, only) == 90).all()
 
 
 def test_background_layer_sits_behind_the_occluder():
@@ -96,7 +103,7 @@ def test_background_layer_sits_behind_the_occluder():
     covered = layer.region
     assert np.all(layer.disparity[covered] <= grid_disparity[covered] + 1e-6)
     assert np.all(layer.disparity[~covered] == grid_disparity[~covered])
-    assert layer.rgb.shape[:2] == (rgb.shape[0] // 2, rgb.shape[1] // 2)
+    assert layer.rgb.shape == rgb.shape  # full resolution: silhouettes show its far-side texels
 
 
 def test_frame_extension_continues_planes_and_fades_to_the_dome():
@@ -175,6 +182,8 @@ def test_dome_colors_follow_elevation():
 def test_ground_disc_is_sunk_below_the_plane():
     plane = fit_ground(_plane_points([0, 1, 0], 1.5), np.full((600, 3), 0.3))
     positions, colors, indices = ground_disc_mesh(plane, 50.0, 24, np.array([1.0, 1, 1]), sink=0.075)
+    centre = -plane.normal * (plane.offset + 0.075)
+    assert np.linalg.norm(positions - centre, axis=1).max() == pytest.approx(50.0, rel=1e-4)
     heights = positions @ plane.normal + plane.offset
     np.testing.assert_allclose(heights, -0.075, atol=1e-4)
     assert indices.max() < len(positions)
@@ -197,6 +206,38 @@ def test_environment_map_reproduces_the_photo_ahead_and_wraps_seamlessly():
     # Straight up and down fade to the supplied zenith / ground tones.
     np.testing.assert_allclose(env[0].mean(axis=0), [127, 153, 229], atol=30)
     np.testing.assert_allclose(env[-1].mean(axis=0), [76, 76, 51], atol=30)
+
+
+def test_environment_has_no_mirrored_copies_of_the_photo():
+    """A distinctive mark near the photo's right edge must not reappear
+    mirrored beside it (the earlier surround did exactly that)."""
+    from viewfinder.world.camera import intrinsics_for
+    from viewfinder.world.environment import environment_map, sample_environment
+
+    rgb = np.full((300, 400, 3), 100, np.uint8)
+    rgb[100:200, 360:390] = (255, 255, 0)  # yellow bar just inside the right edge
+    camera = intrinsics_for(400, 300)
+    env = environment_map(rgb, camera, (1024, 512), np.array([0.4] * 3), np.array([0.4] * 3))
+    half_h = np.arctan(200 / camera.fx)
+    beyond = []
+    for degrees in (8, 15, 25):
+        a = half_h + np.radians(degrees)
+        d = np.array([[[np.sin(a), 0.0, -np.cos(a)]]])
+        beyond.append(sample_environment(env, d)[0, 0])
+    # Outside the frame the yellow bar may tint the surround a little, but
+    # never reappears as a bright yellow copy.
+    assert all(colour[2] > 0.6 * colour[0] for colour in beyond)
+
+
+def test_looking_up_is_a_smooth_pole_not_rays():
+    from viewfinder.world.camera import intrinsics_for
+    from viewfinder.world.environment import environment_map
+
+    rng = np.random.default_rng(0)
+    rgb = rng.integers(0, 255, (300, 400, 3), dtype=np.uint8)  # busy top row
+    env = environment_map(rgb, intrinsics_for(400, 300), (512, 256), np.array([0.5, 0.6, 0.9]), np.zeros(3))
+    top_band = env[:12].astype(float)
+    assert top_band.std(axis=1).max() < 6.0  # uniform around the pole: no radial streaks
 
 
 def test_full_panorama_environment_is_the_panorama_all_round():

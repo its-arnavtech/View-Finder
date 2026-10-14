@@ -26,6 +26,8 @@ from .environment import (
     sample_environment,
 )
 from .geometry import (
+    guided_filter,
+    sharpen_depth_edges,
     make_grid,
     navigation_bounds,
     near_side_of_jumps,
@@ -37,7 +39,7 @@ from .geometry import (
 from .gltf import GlbBuilder
 from .ingest import ImageSource, load_source
 from .layers import background_layer, detect_sky, sky_colors
-from .mesh import MeshData, grid_triangles, sky_mesh, surface_mesh
+from .mesh import MeshData, foreground_mesh, grid_triangles, silhouette_mask, sky_mesh, surface_mesh
 from .profiles import QualityProfile, get_profile, profile_dict
 
 logger = logging.getLogger(__name__)
@@ -74,17 +76,28 @@ class WorldResult:
         return len(self.glb)
 
 
-def _encode_jpeg(rgb: np.ndarray, long_side: int, quality: int) -> tuple[bytes, list[int]]:
-    image = Image.fromarray(rgb)
+def _fit(image: Image.Image, long_side: int) -> Image.Image:
     scale = long_side / max(image.size)
-    if scale < 1.0:
-        image = image.resize(
-            (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
-            Image.Resampling.LANCZOS,
-        )
+    if scale >= 1.0:
+        return image
+    size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    return image.resize(size, Image.Resampling.LANCZOS if image.mode == "RGB" else Image.Resampling.BOX)
+
+
+def _encode_jpeg(rgb: np.ndarray, long_side: int, quality: int) -> tuple[bytes, list[int], str]:
+    image = _fit(Image.fromarray(rgb), long_side)
     buffer = io.BytesIO()
     image.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=False)
-    return buffer.getvalue(), [image.width, image.height]
+    return buffer.getvalue(), [image.width, image.height], "image/jpeg"
+
+
+def _encode_mask(keep: np.ndarray, long_side: int) -> tuple[bytes, list[int], str]:
+    """Keep-mask as an 8-bit PNG. Mostly solid white, so it compresses to a
+    few tens of KB; box-filtered on downscale so its edge stays anti-aliased."""
+    image = _fit(Image.fromarray(np.where(keep, 255, 0).astype(np.uint8), mode="L"), long_side)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue(), [image.width, image.height], "image/png"
 
 
 def _rgb01(color: np.ndarray) -> list[float]:
@@ -131,6 +144,13 @@ def build_world(
     sky = detect_sky(provisional) if estimator.name != "heuristic" else np.zeros_like(raw, bool)
     normalized = normalize_disparity(raw, exclude=sky)
     normalized = smooth_disparity(normalized, max(width, height))
+    # Snap depth boundaries onto the photo's colour edges (see guided_filter):
+    # silhouettes are classified per pixel, so a depth edge one or two pixels
+    # off its colour edge shows as a striped halo when the viewer moves.
+    luminance = cv2.cvtColor(photo.rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    normalized = np.clip(
+        guided_filter(luminance, normalized, max(2, round(max(width, height) / 160)), 4e-3), 0.0, 1.0
+    )
     normalized[sky] = 0.0
     zenith, horizon = sky_colors(photo.rgb, sky)
     # Below-horizon dome colour: the median of the bottom band, so the dome,
@@ -167,6 +187,11 @@ def build_world(
     canvas = extend_frame(photo.rgb, normalized, sky, (pad_y, pad_x), fade_to=fade)
     grid = make_grid(canvas.rgb.shape[1], canvas.rgb.shape[0], profile.grid_long)
     pixel_disparity = to_scene_disparity(canvas.disparity, profile.far)
+    # Collapse soft depth ramps at occlusions into single steps. Mesh and
+    # silhouette mask both read this same map, so they agree on every edge.
+    pixel_disparity = sharpen_depth_edges(
+        pixel_disparity, canvas.rgb, profile.edge_disparity_jump, grid.stride
+    )
     # A 3x3 median at grid resolution removes single-vertex depth spikes
     # (grass blades, wires narrower than a grid cell) that would otherwise
     # shred the near field into slivers, while real silhouettes, which span
@@ -223,9 +248,19 @@ def build_world(
             meshes.append(sky_layer)
 
     if ground.accepted:
+        # Only as far as the floor the photo actually shows, a few times
+        # over. A disc reaching the horizon builds an infinite flat plain
+        # through walls and hills (a slot canyon's river floor became one).
+        # Past the rim, the dome's lower half (the same colours) takes over.
+        floor = positions[ground_sample].reshape(-1, 3)
+        foot = -ground.normal * ground.offset
+        offsets = floor - foot
+        across = offsets - np.outer(offsets @ ground.normal, ground.normal)
+        reach = float(np.percentile(np.linalg.norm(across, axis=1), 90)) if len(floor) else profile.far
+        disc_radius = float(np.clip(2.5 * reach, 0.25 * profile.far, GROUND_RADIUS * profile.far))
         disc_positions, disc_colors, disc_indices = ground_disc_mesh(
             ground,
-            profile.far * GROUND_RADIUS,
+            disc_radius,
             # Enough segments for the surround's colours to vary around the disc.
             max(48, 2 * profile.sky_sphere_segments),
             horizon,
@@ -235,7 +270,9 @@ def build_world(
             sink=0.05 * abs(ground.offset),
             environment=environment,
         )
-        meshes.append(MeshData("ground", disc_positions, disc_indices, colors=disc_colors))
+        # Unfogged: its colours already come from the (unfogged) surround, and
+        # fogging only one of the two drew a visible line where they meet.
+        meshes.append(MeshData("ground", disc_positions, disc_indices, colors=disc_colors, fog=False))
 
     background_positions = unproject(
         grid, canvas_intrinsics, BACKGROUND_PUSH / background.disparity
@@ -252,13 +289,19 @@ def build_world(
     if background_mesh:
         meshes.append(background_mesh)
 
-    foreground = surface_mesh(
-        "foreground", positions, uvs, disparity, ~sky_grid, profile.edge_disparity_jump, texture="photo"
+    grid_rays = canvas_intrinsics.rays(grid.u, grid.v)
+    foreground, silhouettes, cell_edge, cell_mid = foreground_mesh(
+        "foreground", grid_rays, uvs, disparity, ~sky_grid, profile.edge_disparity_jump, texture="photo"
     )
+    keep_mask = silhouette_mask(pixel_disparity, cell_edge, cell_mid)
+    # Drop isolated keep/discard pixels so silhouettes are clean curves.
+    keep_mask = cv2.medianBlur(keep_mask.astype(np.uint8) * 255, 5) > 127
+    if silhouettes is not None:
+        silhouettes.mask = "photo_mask"
     candidates = int(
-        np.count_nonzero((~sky_grid).reshape(-1)[grid_triangles(grid.height, grid.width)].all(axis=1))
+        np.count_nonzero((~sky_grid).reshape(-1)[grid_triangles(grid.height, grid.width)].any(axis=1))
     )
-    if foreground is None and sky_layer is None:
+    if foreground is None and silhouettes is None and sky_layer is None:
         # Every image must produce a world. If the depth map left nothing
         # (pathological input: pure noise, a uniform frame), fall back to the
         # photo as one uncut surface rather than failing.
@@ -269,21 +312,25 @@ def build_world(
         candidates = foreground.triangle_count
     if foreground is not None:
         meshes.append(foreground)
-    elif sky_layer is not None:
+    if silhouettes is not None:
+        meshes.append(silhouettes)
+    if foreground is None and silhouettes is None and sky_layer is not None:
         warnings.append("the photo is all sky; it is shown on the sky sphere with no foreground")
     mark("mesh")
 
     # -- 6. export --------------------------------------------------------
-    textures: dict[str, tuple[bytes, list[int]]] = {
+    textures: dict[str, tuple[bytes, list[int], str]] = {
         "photo": _encode_jpeg(canvas.rgb, profile.texture_long_side, profile.jpeg_quality),
         # Blurry by construction, so a lower JPEG quality costs nothing visible.
         "environment": _encode_jpeg(environment, max(profile.environment_size), 80),
     }
+    if silhouettes is not None:
+        textures["photo_mask"] = _encode_mask(keep_mask, profile.texture_long_side)
     if background_mesh:
-        # Built at half resolution (layers.background_layer): the layer is
-        # only ever seen in thin slivers behind silhouettes.
+        # Full resolution: the far-side texels of every silhouette are shown
+        # from this layer, so it must be as sharp as the photo.
         textures["background"] = _encode_jpeg(
-            background.rgb, profile.texture_long_side // 2, profile.jpeg_quality
+            background.rgb, profile.texture_long_side, profile.jpeg_quality
         )
 
     valid = original_grid & ~sky_grid
@@ -319,7 +366,7 @@ def build_world(
             "radii": {
                 "sky": profile.far * SKY_RADIUS,
                 "dome": profile.far * DOME_RADIUS,
-                "ground": profile.far * GROUND_RADIUS,
+                "ground": round(disc_radius, 3) if ground.accepted else 0.0,
             },
         },
         "layers": {mesh.name: mesh.stats() for mesh in meshes},
@@ -328,17 +375,25 @@ def build_world(
             # Share of non-sky grid triangles kept after occlusion cutting. Low
             # values mean a torn, sliver-heavy surface.
             "foreground_coverage": round(
-                (foreground.triangle_count if foreground else 0) / max(1, candidates), 4
+                sum(m.triangle_count for m in (foreground, silhouettes) if m is not None) / max(1, candidates),
+                4,
             ),
+            # Share of grid cells that are occlusion edges (rendered with the
+            # silhouette mask), and of texels the mask discards.
+            "edge_cell_fraction": round(float(cell_edge.mean()), 4),
+            "masked_texel_fraction": round(float(1.0 - keep_mask.mean()), 4),
             "cut_vertices_fraction": round(float(near.mean()), 4),
         },
-        "textures": {key: {"size": size, "bytes": len(data)} for key, (data, size) in textures.items()},
+        "textures": {
+            key: {"size": size, "bytes": len(data), "mime": mime}
+            for key, (data, size, mime) in textures.items()
+        },
         "timings_ms": timings,
         "warnings": warnings,
     }
 
     builder = GlbBuilder()
-    texture_index = {key: builder.add_texture(data) for key, (data, _) in textures.items()}
+    texture_index = {key: builder.add_texture(data, mime) for key, (data, _, mime) in textures.items()}
     for mesh in meshes:
         builder.add_mesh(
             mesh.name,
@@ -347,6 +402,7 @@ def build_world(
             uvs=mesh.uvs,
             colors=mesh.colors,
             texture=texture_index.get(mesh.texture) if mesh.texture else None,
+            mask=texture_index.get(mesh.mask) if mesh.mask else None,
         )
     glb = builder.build(extras={"viewfinder_world": manifest})
     mark("export")

@@ -177,3 +177,15 @@ meshes fit 16-bit indices, textures and file size are within budget, and
 the FOV and navigation are sane. Results go to
 `local-data/world-stress/{results.csv,summary.json}`, and the script exits 1
 on any failure.
+
+### Visual check: how a world looks from six poses
+
+```bash
+python benchmark-harness/world_preview.py photo.jpg [more.jpg ...] --tag after
+```
+
+This renders each world offline from six fixed poses (front, look left,
+look right, look up, a step to the navigation limit, free roam) into a
+contact sheet under `local-data/world-eval/`. It uses the viewer's camera
+model, fog and silhouette mask, so a pose there matches the browser. Use it
+to compare an engine change before and after across a set of photos.

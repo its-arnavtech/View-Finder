@@ -138,9 +138,22 @@ frames, not the stitch. The working-size and mesh budgets are set by
 2. Map to depth with an inverse-depth interpolation, which keeps the
    network's depth *ordering* and its near-field precision:
    `z = 1 / (d·(1/near − 1/far) + 1/far)`, with `near = 1`, `far = profile.far`.
-3. Smooth with a joint bilateral pass in log-depth. This flattens texture noise
-   but keeps object boundaries sharp, and the boundaries are what step 5
-   detects.
+3. Smooth with a bilateral pass. This flattens texture noise but keeps object
+   boundaries sharp, and the boundaries are what step 5 detects.
+4. **Snap depth edges onto colour edges.** A guided filter (He et al. 2010),
+   with the photo's luminance as the guide, moves the network's soft,
+   slightly offset boundaries onto the photo's actual edges.
+5. **Turn occlusion ramps into steps** (`geometry.sharpen_depth_edges`). The
+   network draws a boundary as a ramp several pixels wide, and on the mesh
+   grid each step of that ramp became its own edge cell. Seen from the side,
+   that read as horizontal "Venetian blind" stripes. A pixel is *on a ramp*
+   when its gradient is steeper than `jump / grid stride`, the same test the
+   grid uses, expressed per pixel. A ground plane never qualifies. Each ramp
+   pixel is assigned to the near or the far side **by colour**: whichever
+   local mean colour (of the confidently near and the confidently far pixels
+   around it) it is closer to. It then takes that side's disparity. The mesh
+   and the silhouette mask (§3.7) both read this one map, so they agree on
+   every edge.
 
 ### 3.5 Segmentation and layered depth
 
@@ -164,21 +177,28 @@ frames, not the stitch. The working-size and mesh budgets are set by
     Background is by definition farther, so the farthest nearby surface is
     the best cheap estimate of what continues behind the occluder.
   - Colour: only true *occluder* pixels (nearer than something within the
-    radius by more than the jump) are replaced. They are flooded with colour
-    from neighbours that are *farther than themselves*, at half resolution.
-    This continues the background's texture as streaks. Telea inpainting was
-    the first implementation: it smeared both sides into flat grey and took
-    3–6 s.
+    radius by more than the jump) are replaced, at full resolution, with a
+    **push-pull** fill: donor colours are averaged down an image pyramid and
+    pulled back up, giving each hole the local background colour, soft and
+    continuous. Donors are far-side pixels and pixels with no silhouette
+    nearby; the near side of any jump (an occluder, including its rim) never
+    donates. History: Telea inpainting smeared both sides into flat grey and
+    took 3–6 s; a nearest-pixel (Voronoi) copy was fast but dragged straight
+    streaks out of every silhouette, which read as tearing when moving.
   - Meshed only over the region, with the same culling at 2× the threshold,
     and pushed back 1 % to avoid z-fighting with the foreground layer.
 
 ### 3.6 Environment ("the world around the photo")
 
 - **Frame extension.** The image and depth are padded by
-  `profile.pad_fraction` on every side. Colour is reflect-padded, blended
-  toward a heavy blur, then toward the *dome's colour in each pad pixel's
-  direction*, with weights rising across the pad. The photo's edge therefore
-  dissolves into the surrounding sky and ground instead of ending in a wall.
+  `profile.pad_fraction` on every side. Colour is the photo's edge pixels
+  **stretched** outward (never mirrored: a mirrored border puts a symmetric
+  copy of the edge beside it, and symmetry is the first thing the eye
+  catches). Each pad is blurred *along its edge*, more the farther out it
+  is: side pads vertically, top and bottom pads horizontally. That removes
+  the stripes a stretch otherwise leaves. The pad then fades toward the
+  surround's colour in each pad pixel's direction, so the photo's edge
+  dissolves into the surround instead of ending in a wall.
   Disparity is extrapolated linearly from each border's gradient, fading over
   the pad. A plane's disparity is affine in pixel coordinates, so floors and
   walls continue as themselves, while edge replication would build a
@@ -190,25 +210,35 @@ frames, not the stitch. The working-size and mesh budgets are set by
   (1024×512 on mobile, a power of two so WebGL1 can mipmap it) on the dome.
   It covers every direction the photo never saw, so looking around always
   shows a world:
-  - Straight ahead it reproduces the photo.
-  - Past each side edge the photo is mirrored outward and blurred more the
-    farther you turn.
-  - Behind the viewer, the right-edge and left-edge continuations
-    cross-fade, so the wrap has no seam.
-  - Above and below the frame it fades into the photo's zenith and ground
-    tones.
+  - Straight ahead it is the photo, softly blurred. It is mostly hidden
+    behind the mesh and shows only through gaps.
+  - Everywhere else it is built from **vertical colour profiles**: the
+    per-row median colour of the photo's outer edge strips, its thirds and
+    the whole frame. "What colour is the scene at this elevation on this
+    side" is all a surround can honestly claim. Going around, it moves from
+    the edge strip to that side's third to the whole frame, and is blurred
+    vertically more the farther you turn, so a border feature (a cloud)
+    diffuses instead of running round as a stripe.
+  - Above and below the photo it converges **fully** to the zenith and
+    ground tones, so looking straight up or down is a smooth pole.
 
-  The frame padding and the ground disc take their colours from this same
-  panorama, so all three agree. It is an ambient continuation, deliberately
-  blurred, not a claim about what was there.
+  It copies no image structure, so turning around never shows mirrored
+  shapes. An earlier version mirrored the photo outward, which produced
+  "Rorschach" patterns and a radial starburst at the zenith. The ambient part
+  is smooth by construction, so it is computed at a quarter of the
+  resolution. The frame padding and the ground disc take their colours from
+  this same panorama, so all three agree.
 - **Ground plane.** RANSAC plane fit on 3D points from the bottom ~38 % of the
   non-sky image. Three gates must all pass: an inlier ratio of at least 45 %,
   a normal within 40° of camera-up, and **at most 5 % of the whole scene below
   the plane**. A real ground has nothing visible beneath it, while a
-  dashboard or a table top does. When accepted, a large disc is sunk 5 % of
-  the camera height below the plane, coloured from the inliers and faded into
-  fog. The viewer also draws it with a slope-scaled polygon offset, so the
-  photo's own ground always wins where it exists. When rejected (close-ups,
+  dashboard or a table top does. When accepted, a disc is sunk 5 % of the
+  camera height below the plane. It reaches only 2.5× the floor the photo
+  actually shows, because a disc to the horizon built an infinite flat plain
+  through a slot canyon's walls. It is coloured from the surround along each
+  vertex's direction and left **unfogged** like the surround, so the two
+  meet without a line. The viewer also draws it with a slope-scaled polygon
+  offset, so the photo's own ground always wins where it exists. When rejected (close-ups,
   aerial shots, foreground surfaces) no ground is invented.
 - **Fog.** Exponential fog toward the horizon colour, with density chosen so
   that geometry at `far` is about 60 % fogged. It hides the hard seam between
@@ -222,11 +252,21 @@ frames, not the stitch. The working-size and mesh budgets are set by
 - Vertex = camera-ray unprojection `(x, y, z) = ((u−cx)/fx·z, −(v−cy)/fy·z, −z)`
   in glTF's right-handed, +Y-up, camera-looking-down-−Z convention. The
   original camera sits at the origin.
-- Each grid cell yields two triangles. A triangle is **dropped** when its
-  vertices straddle an occlusion edge (disparity spread above the threshold),
-  which removes the "rubber sheet" stretched between a foreground object and
-  the background. The background layer shows through the hole. Sky
-  vertices are excluded from the foreground mesh.
+- Each grid cell yields two triangles. A triangle whose vertices straddle an
+  occlusion edge (disparity spread above the threshold) is neither stretched
+  across the gap (a "rubber sheet") nor dropped (a staircase of missing
+  cells along every silhouette). It is **rebuilt flat at its own near depth**:
+  its far-side corners get private vertices on the near corners' mean
+  disparity, so the near object continues one cell past its edge. These
+  edge triangles go in a separate `silhouettes` mesh, drawn with a
+  per-pixel **keep-mask** that discards the texels on the far side of the
+  cell's midpoint disparity. The background layer shows through exactly
+  there, so silhouettes follow the photo's pixels, not the grid. A cell
+  where three surfaces meet has no single silhouette to extend and is cut.
+  The separate mesh matters on phones: a shader that can `discard` disables
+  early depth testing on many mobile GPUs, so only the ~4 % of triangles
+  that need it pay for it.
+- Sky vertices are excluded from the foreground and silhouette meshes.
 - Unused vertices are compacted away. Indices are `uint16` when a primitive has
   ≤ 65,535 vertices and `uint32` otherwise. The mobile profile is sized to stay
   in `uint16`.
@@ -234,9 +274,13 @@ frames, not the stitch. The working-size and mesh budgets are set by
 ### 3.8 Export
 
 - **GLB 2.0**, written by a small dependency-free writer (`gltf.py`), with one
-  node per layer: `foreground`, `background`, `sky`, `ground`, `dome`.
-  Materials use `KHR_materials_unlit`, because the photo already contains its
-  lighting and re-lighting it would double-shade. Textures are embedded JPEGs.
+  node per layer: `dome`, `sky`, `ground`, `background`, `foreground`,
+  `silhouettes`. Materials use `KHR_materials_unlit`, because the photo
+  already contains its lighting and re-lighting it would double-shade.
+  Textures are embedded JPEGs. The silhouette keep-mask is an 8-bit PNG
+  (a few KB), referenced from the material's `extras.viewfinder_mask`.
+  Other glTF viewers ignore it and show a soft fringe at silhouettes
+  instead of a broken mesh.
   The file opens in Blender, Windows 3D Viewer, Android Scene Viewer and
   `<model-viewer>`, not only in the bundled viewer.
 - **Manifest** (`*_world.json`, also embedded in the GLB scene `extras`):

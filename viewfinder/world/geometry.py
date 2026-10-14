@@ -139,3 +139,110 @@ def navigation_bounds(depth: np.ndarray, valid: np.ndarray) -> dict[str, list[fl
         "half_extents": [round(h, 4) for h in half],
         "near_field_depth": round(near_field, 4),
     }
+
+
+def guided_filter(guide: np.ndarray, source: np.ndarray, radius: int, eps: float) -> np.ndarray:
+    """Edge-aware filtering of ``source`` steered by ``guide`` (He et al. 2010).
+
+    Used to snap the depth network's soft, slightly offset boundaries onto the
+    photo's actual colour edges. Without it, near/far classification along a
+    silhouette flips pixel by pixel and leaves a striped halo of background
+    texels glued to the foreground's edge. Each output pixel is a local
+    linear function of the guide, so depth edges land where colour edges are.
+
+    Args:
+        guide: HxW float32 guidance (luminance in [0, 1]).
+        source: HxW float32 signal to filter (disparity).
+        radius: box radius in pixels.
+        eps: regularisation. Larger values follow the guide's edges less and
+            copy less of its texture into the depth.
+    """
+    size = (2 * radius + 1, 2 * radius + 1)
+
+    def box(x: np.ndarray) -> np.ndarray:
+        return cv2.boxFilter(x, cv2.CV_32F, size, borderType=cv2.BORDER_REFLECT)
+
+    guide = guide.astype(np.float32)
+    source = source.astype(np.float32)
+    mean_g, mean_s = box(guide), box(source)
+    var_g = box(guide * guide) - mean_g * mean_g
+    cov_gs = box(guide * source) - mean_g * mean_s
+    a = cov_gs / (var_g + eps)
+    b = mean_s - a * mean_g
+    return (box(a) * guide + box(b)).astype(np.float32)
+
+
+def sharpen_depth_edges(
+    pixel_disparity: np.ndarray,
+    rgb: np.ndarray,
+    jump: float,
+    stride: float,
+    ramp_px: float | None = None,
+) -> np.ndarray:
+    """Turn soft occlusion ramps in a per-pixel disparity map into steps,
+    placed on the photo's colour edges.
+
+    Monocular depth draws an occlusion boundary as a ramp several pixels
+    wide, and not quite where the colour edge is. On the mesh grid, every
+    step along a ramp exceeded ``jump``, so a ramp became a run of edge cells
+    extended at slightly different depths ("Venetian blind" stripes from the
+    side). Splitting a ramp by depth alone puts the cut a pixel or two off
+    the colour edge, which leaves shards of background glued to the
+    foreground. Silhouettes are cut per pixel, so the mesh and the mask both
+    read this one sharpened map.
+
+    1. A pixel is on a ramp when its gradient is steeper than
+       ``jump / stride`` (the grid's edge test, per pixel). Ground planes
+       never qualify.
+    2. Each ramp pixel is assigned to the near or the far side by *colour*:
+       whichever local mean colour, of the confidently near or the
+       confidently far pixels around it, it is closer to. Depth decides only
+       where colour cannot (no confident pixels on one side).
+    3. It takes that side's disparity (the neighbourhood's near or far value).
+
+    The neighbourhood must span a whole ramp, or the snap targets are
+    mid-ramp values, but in clutter a wide one mixes neighbouring objects.
+    ``ramp_px`` defaults to 0.6% of the image's long side (the network's
+    ramps after upsampling) and is never less than 1.5 grid cells.
+    """
+    values = pixel_disparity.astype(np.float32)
+    gx = cv2.Sobel(values, cv2.CV_32F, 1, 0, ksize=3) / 8.0
+    gy = cv2.Sobel(values, cv2.CV_32F, 0, 1, ksize=3) / 8.0
+    steep = np.hypot(gx, gy) > 0.5 * jump / max(stride, 1.0)
+    if not steep.any():
+        return values
+    ramp = cv2.dilate(steep.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+    if ramp_px is None:
+        ramp_px = 0.006 * max(values.shape)
+    size = 2 * int(np.ceil(max(2.0, 1.5 * stride, ramp_px))) + 1
+    window = np.ones((size, size), np.uint8)
+    near = cv2.dilate(values, window)
+    far = cv2.erode(values, window)
+    spread = near - far
+    snap = ramp & (spread > jump)
+    if not snap.any():
+        return values
+
+    # Confident pixels: in the outer quarter of the local range on each side.
+    near_core = (values >= near - 0.25 * spread).astype(np.float32)
+    far_core = (values <= far + 0.25 * spread).astype(np.float32)
+    colour = rgb.astype(np.float32)
+    box = (2 * size + 1, 2 * size + 1)
+
+    def local_mean(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        weight = cv2.boxFilter(mask, -1, box, normalize=False)
+        total = cv2.boxFilter(colour * mask[..., None], -1, box, normalize=False)
+        return total / np.maximum(weight, 1e-6)[..., None], weight
+
+    near_colour, near_weight = local_mean(near_core)
+    far_colour, far_weight = local_mean(far_core)
+    to_near = np.sum((colour - near_colour) ** 2, axis=2)
+    to_far = np.sum((colour - far_colour) ** 2, axis=2)
+    by_colour = to_near < to_far
+    by_depth = values >= (near + far) / 2.0
+    decidable = (near_weight > 0.5) & (far_weight > 0.5)
+    is_near = np.where(decidable, by_colour, by_depth)
+
+    out = values.copy()
+    out[snap] = np.where(is_near[snap], near[snap], far[snap])
+    return out

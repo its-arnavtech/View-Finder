@@ -40,13 +40,45 @@ def _smoothstep(x: np.ndarray) -> np.ndarray:
     return x * x * (3.0 - 2.0 * x)
 
 
-def _pad_weight(height: int, width: int, pad_y: int, pad_x: int) -> np.ndarray:
-    """0 inside the original frame, rising smoothly to 1 at the outer border."""
+def _pad_distances(height: int, width: int, pad_y: int, pad_x: int) -> tuple[np.ndarray, np.ndarray]:
+    """Per-row and per-column distance into the pad, 0 at the photo edge and 1
+    at the outer border (0 everywhere inside the photo)."""
     ys = np.arange(height + 2 * pad_y, dtype=np.float32)
     xs = np.arange(width + 2 * pad_x, dtype=np.float32)
     dy = np.maximum(np.maximum(pad_y - ys, ys - (pad_y + height - 1)), 0.0) / max(pad_y, 1)
     dx = np.maximum(np.maximum(pad_x - xs, xs - (pad_x + width - 1)), 0.0) / max(pad_x, 1)
+    return dy, dx
+
+
+def _pad_weight(height: int, width: int, pad_y: int, pad_x: int) -> np.ndarray:
+    """0 inside the original frame, rising smoothly to 1 at the outer border."""
+    dy, dx = _pad_distances(height, width, pad_y, pad_x)
     return _smoothstep(np.maximum(dy[:, None], dx[None, :]))
+
+
+def _box_gaussian(image: np.ndarray, sigma: float, axis: int) -> np.ndarray:
+    """Gaussian blur along one axis, approximated by three box passes. Its
+    cost does not depend on ``sigma``; a true Gaussian with sigma ~100 px
+    needs a ~600 px kernel."""
+    width = max(1, int(round(np.sqrt(4.0 * sigma * sigma + 1.0))))  # 3 boxes ~ sigma
+    size = (1, width) if axis == 0 else (width, 1)
+    out = image
+    for _ in range(3):
+        out = cv2.blur(out, size, borderType=cv2.BORDER_REPLICATE)
+    return out
+
+
+def _progressive_blur(image: np.ndarray, distance: np.ndarray, sigmas: tuple[float, ...], axis: int) -> np.ndarray:
+    """Blur along one ``axis`` (0 = vertical, 1 = horizontal) with a strength
+    that grows with ``distance`` (0..1, broadcastable to the image)."""
+    levels = [image.astype(np.float32)]
+    levels += [_box_gaussian(levels[0], sigma, axis) for sigma in sigmas]
+    position = np.broadcast_to(np.clip(distance, 0.0, 1.0) * (len(levels) - 1), image.shape[:2])
+    # Linear interpolation between the two nearest levels (tent weights).
+    out = np.zeros_like(levels[0])
+    for index, level in enumerate(levels):
+        out += level * np.clip(1.0 - np.abs(position - index), 0.0, 1.0)[..., None]
+    return out
 
 
 def _extrapolate_disparity(disparity: np.ndarray, pad_y: int, pad_x: int) -> np.ndarray:
@@ -119,7 +151,7 @@ def extend_frame(
 ) -> PaddedCanvas:
     """Pad the photo on every side with a soft, depth-consistent continuation.
 
-    Colour goes mirrored → blurred → ``fade_to`` (the dome's colour in each
+    Colour goes stretched edge → blurred → ``fade_to`` (the dome's colour in each
     pad pixel's direction) across the pad, so that when the viewer turns past
     the photo's edge, the edge dissolves into the surrounding sky and ground
     instead of ending in a hard wall.
@@ -127,10 +159,30 @@ def extend_frame(
     height, width = disparity.shape
     pad_y, pad_x = pad
     weight = _pad_weight(height, width, pad_y, pad_x)[..., None]
+    dy, dx = _pad_distances(height, width, pad_y, pad_x)
 
-    mirrored = cv2.copyMakeBorder(rgb, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_REFLECT_101)
-    blurred = fast_blur(mirrored, max(4.0, max(height, width) / 40.0))
-    canvas = mirrored * (1.0 - weight) + blurred * weight
+    # Edge pixels are stretched outward, never mirrored: a mirrored border
+    # puts a symmetric copy of the photo's edge right beside it, and that
+    # symmetry is instantly visible. Stretching has its own artefact (every
+    # row of a side pad is one colour, so it reads as stripes), so each pad
+    # is blurred *along* its edge, more the farther out it is: side pads
+    # vertically, top and bottom pads horizontally.
+    stretched = cv2.copyMakeBorder(rgb, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_REPLICATE)
+    long_side = max(height, width)
+    sigmas = (long_side / 50.0, long_side / 18.0, long_side / 8.0)
+    # Only the pad strips need it: side strips (full height) and end strips
+    # (full width). Inside the frame the photo is copied back below.
+    sides = stretched.astype(np.float32)
+    ends = stretched.astype(np.float32)
+    total_w = width + 2 * pad_x
+    total_h = height + 2 * pad_y
+    for columns in (slice(0, pad_x), slice(total_w - pad_x, total_w)) if pad_x else ():
+        sides[:, columns] = _progressive_blur(stretched[:, columns], dx[None, columns], sigmas, axis=0)
+    for rows in (slice(0, pad_y), slice(total_h - pad_y, total_h)) if pad_y else ():
+        ends[rows, :] = _progressive_blur(stretched[rows, :], dy[rows, None], sigmas, axis=1)
+    # In the corners both apply; weight by which edge is nearer.
+    side_share = (dx[None, :] / np.maximum(dx[None, :] + dy[:, None], 1e-6))[..., None]
+    canvas = sides * side_share + ends * (1.0 - side_share)
     if fade_to is not None:
         fade_weight = 0.9 * weight**2
         canvas = canvas * (1.0 - fade_weight) + fade_to.astype(np.float32) * fade_weight
@@ -282,18 +334,98 @@ def direction_angles(directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return np.arctan2(x, -z), np.arcsin(np.clip(y, -1.0, 1.0))
 
 
-def _reflect(coordinate: np.ndarray, size: int) -> np.ndarray:
-    """Ping-pong ``coordinate`` into [0, size - 1] (mirror tiling)."""
-    period = 2.0 * (size - 1)
-    folded = np.mod(coordinate, period)
-    return np.where(folded > size - 1, period - folded, folded)
-
-
 def _wrap_blur(image: np.ndarray, sigma: float) -> np.ndarray:
     """Gaussian blur that wraps horizontally (azimuth is periodic)."""
     margin = int(3 * sigma) + 1
     wrapped = np.concatenate([image[:, -margin:], image, image[:, :margin]], axis=1)
     return fast_blur(wrapped, sigma)[:, margin:-margin]
+
+
+def _row_profiles(rgb: np.ndarray, sigma_fraction: float) -> np.ndarray:
+    """Per-row median colours of vertical strips, smoothed along rows.
+
+    Shape (6, height, 3): left edge strip, left third, centre third, right
+    third, right edge strip, whole frame. A profile answers "what colour is
+    the scene at this elevation on this side", which is all a surround can
+    honestly claim. The edge strips (the outer 4%) make the surround start
+    out exactly matching the photo's border.
+    """
+    height, width = rgb.shape[:2]
+    edge = max(1, int(round(width * 0.04)))
+    thirds = np.linspace(0, width, 4).astype(int)
+    strips = [
+        rgb[:, :edge],
+        rgb[:, thirds[0] : thirds[1]],
+        rgb[:, thirds[1] : thirds[2]],
+        rgb[:, thirds[2] : thirds[3]],
+        rgb[:, width - edge :],
+        rgb,
+    ]
+    profiles = np.stack([np.median(strip, axis=1) for strip in strips]).astype(np.float32)
+    sigma = max(1.0, height * sigma_fraction)
+    return np.stack(
+        [cv2.GaussianBlur(p[:, None, :], (0, 0), sigmaX=0.1, sigmaY=sigma, borderType=cv2.BORDER_REPLICATE)[:, 0, :]
+         for p in profiles]
+    )
+
+
+def _angle_grid(width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
+    """(azimuth, elevation) at the pixel centres of an equirectangular image."""
+    azimuth = (np.arange(width, dtype=np.float32) + 0.5) / width * 2 * np.pi - np.pi
+    elevation = np.pi / 2 - (np.arange(height, dtype=np.float32) + 0.5) / height * np.pi
+    return np.meshgrid(azimuth, elevation)
+
+
+def _ambient(
+    rgb: np.ndarray, a: np.ndarray, e: np.ndarray, fy: float, half_h: float, half_v: float
+) -> np.ndarray:
+    """Profile-based surround colour for every (azimuth, elevation)."""
+    height = rgb.shape[0]
+    cy = height / 2.0
+    sharp_profiles = _row_profiles(rgb, 1 / 30)
+    soft_profiles = _row_profiles(rgb, 1 / 6)
+    row_index = np.clip(cy - fy * np.tan(np.clip(e, -1.5, 1.5)), 0, height - 1)
+    lower = np.floor(row_index).astype(int)
+    upper = np.minimum(lower + 1, height - 1)
+    frac = (row_index - lower)[..., None]
+
+    def sample(profiles):
+        return profiles[:, lower] * (1 - frac) + profiles[:, upper] * frac
+
+    l_edge, left, centre, right, r_edge, whole = sample(sharp_profiles)
+    _, left_soft, _, right_soft, _, whole_soft = sample(soft_profiles)
+
+    unwrapped = np.where(a < -half_h, a + 2 * np.pi, a)
+    inside = unwrapped <= half_h
+    back_span = max(2 * np.pi - 2 * half_h, 1e-6)
+    beyond = np.clip(unwrapped - half_h, 0.0, back_span)
+    across = np.clip((a + half_h) / (2 * half_h), 0.0, 1.0)[..., None]
+    ahead = np.where(
+        across < 0.5,
+        left + (centre - left) * (across / 0.5),
+        centre + (right - centre) * ((across - 0.5) / 0.5),
+    )
+
+    # Going around: the edge strip, then that side's third, then the whole
+    # frame, blurred vertically more the farther you turn so a feature at the
+    # border (a cloud, a lamp) diffuses instead of running round as a stripe.
+    def around(edge_profile, side, side_soft, distance):
+        d = distance[..., None]
+        out = edge_profile + (side - edge_profile) * _smoothstep(d / np.radians(12.0))
+        out = out + (side_soft - out) * _smoothstep(d / np.radians(45.0))
+        return out + (whole_soft - out) * _smoothstep((d - np.radians(20.0)) / np.radians(70.0))
+
+    behind_right = around(r_edge, right, right_soft, beyond)
+    behind_left = around(l_edge, left, left_soft, back_span - beyond)
+    t = (beyond / back_span)[..., None]
+    behind = behind_right * (1 - t) + behind_left * t
+    ambient = np.where(inside[..., None], ahead, behind)
+
+    # Above and below the photo, side-to-side structure would converge into
+    # beams at the poles: hand over to the whole-frame profile there.
+    vertical_excess = np.maximum(np.abs(e) - half_v, 0.0)
+    to_whole = _smoothstep(vertical_excess / np.radians(15.0))[..., None]
+    return ambient + (whole_soft - ambient) * to_whole
 
 
 def environment_map(
@@ -305,13 +437,22 @@ def environment_map(
 ) -> np.ndarray:
     """A 360° equirectangular surround synthesised from the photo.
 
-    Straight ahead it reproduces the photo. Past each side edge the photo is
-    mirrored outward and blurred more the farther you turn. Behind the
-    viewer, the right-edge and left-edge continuations cross-fade so the wrap
-    is seamless. Above and below the frame it fades into the photo's zenith
-    and ground tones. This is an *ambient* continuation, deliberately
-    blurred, not a claim about what was really there. A full 360° panorama
-    covers every azimuth itself, so it has no back arc to invent.
+    * Ahead (inside the photo's field of view) it is the photo itself, softly
+      blurred. It is mostly hidden behind the mesh and shows only through
+      gaps and at the edges, where it must match.
+    * Everywhere else it is built from *vertical colour profiles*: the
+      per-row median colour of the photo's border strips and thirds, carried
+      around the viewer, blurred more with distance and blended into the
+      whole-frame profile behind them. There is no copied image structure,
+      so turning around never shows mirrored "Rorschach" shapes (an earlier
+      design mirrored the photo outward, and symmetry is the first thing the
+      eye catches).
+    * Above and below the photo it converges fully to the zenith and ground
+      tones, so looking straight up or down shows a smooth pole, not the
+      photo's top row stretched into rays.
+
+    The ambient part is smooth by construction, so it is computed at a
+    quarter of the resolution and upsampled.
     """
     height, width = rgb.shape[:2]
     env_width, env_height = size
@@ -321,56 +462,53 @@ def environment_map(
     half_h = min(np.pi, cx / fx) if cylindrical else float(np.arctan(cx / fx))
     half_v = float(np.arctan(cy / fy))
 
-    azimuth = (np.arange(env_width, dtype=np.float32) + 0.5) / env_width * 2 * np.pi - np.pi
-    elevation = np.pi / 2 - (np.arange(env_height, dtype=np.float32) + 0.5) / env_height * np.pi
-    a, e = np.meshgrid(azimuth, elevation)
+    a, e = _angle_grid(env_width, env_height)
+    tan_e = np.tan(np.clip(e, -1.5, 1.5))
 
-    # Unwrap azimuth so the back arc runs continuously from the right edge
-    # (half_h) to the left edge (2*pi - half_h).
+    # -- ahead: the photo, softly blurred ------------------------------------
+    clipped = np.clip(a, -half_h, half_h)
+    if cylindrical:
+        columns = np.clip(cx + fx * clipped, 0, width - 1)
+        rows_photo = cy - fy * tan_e
+    else:
+        columns = cx + fx * np.tan(clipped)
+        rows_photo = cy - fy * tan_e / np.cos(clipped)
+    soft = cv2.GaussianBlur(rgb, (0, 0), max(1.0, width / 200.0))
+    photo = cv2.remap(
+        soft, columns.astype(np.float32), np.clip(rows_photo, 0, height - 1).astype(np.float32),
+        cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE,
+    ).astype(np.float32)
+
+    # -- elsewhere: profiles, at quarter resolution ---------------------------
+    coarse_w, coarse_h = max(64, env_width // 4), max(32, env_height // 4)
+    ca, ce = _angle_grid(coarse_w, coarse_h)
+    ambient = cv2.resize(
+        _ambient(rgb, ca, ce, fy, half_h, half_v).astype(np.float32),
+        (env_width, env_height),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+    # -- blend: the photo where it exists, profiles beyond it -----------------
     unwrapped = np.where(a < -half_h, a + 2 * np.pi, a)
     inside = unwrapped <= half_h
     back_span = max(2 * np.pi - 2 * half_h, 1e-6)
     beyond = np.clip(unwrapped - half_h, 0.0, back_span)
-    pixels_per_radian = width / (2 * half_h)
-
-    clipped = np.clip(a, -half_h, half_h)
-    columns_right = _reflect((width - 1) - beyond * pixels_per_radian, width)
-    columns_left = _reflect((back_span - beyond) * pixels_per_radian, width)
-    tan_e = np.tan(np.clip(e, -1.5, 1.5))
-    if cylindrical:
-        # Columns are linear in azimuth; rows follow tan(elevation) directly.
-        columns_in = np.clip(cx + fx * clipped, 0, width - 1)
-        rows = np.clip(cy - fy * tan_e, 0, height - 1)
-    else:
-        in_cos = np.cos(clipped)
-        columns_in = cx + fx * np.tan(clipped)
-        rows = np.clip(cy - fy * tan_e / np.where(inside, in_cos, np.cos(half_h)), 0, height - 1)
-
-    def remap(columns: np.ndarray) -> np.ndarray:
-        return cv2.remap(
-            rgb, columns.astype(np.float32), rows.astype(np.float32),
-            cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE,
-        ).astype(np.float32)
-
-    right, left = remap(np.where(inside, columns_in, columns_right)), remap(columns_left)
-    t = np.where(inside, 0.0, beyond / back_span)[..., None]
-    env = right * (1.0 - t) + left * t
-
-    # Blur by how far outside the photo each direction is.
     excess = np.maximum(
         np.where(inside, 0.0, np.minimum(beyond, back_span - beyond)),
         np.maximum(np.abs(e) - half_v, 0.0),
     )
-    soft = _wrap_blur(env, max(1.0, env_width / 400.0))
-    heavy = _wrap_blur(env, env_width / 40.0)
-    w = _smoothstep(excess / np.radians(40.0))[..., None]
-    env = soft * (1.0 - w) + heavy * w
+    # A short hand-over: just outside the frame the edge-strip profile
+    # already matches the border, so the photo is not stretched outward.
+    w = _smoothstep(excess / np.radians(4.0))[..., None]
+    env = photo * (1.0 - w) + ambient * w
 
-    # Above/below the frame, fade to the photo's sky and ground tones.
-    up_t = _smoothstep((e - half_v) / max(1e-3, np.pi / 2 - half_v))[..., None]
-    down_t = _smoothstep((-e - half_v) / max(1e-3, np.pi / 2 - half_v))[..., None]
-    env = env + (zenith * 255.0 - env) * up_t * 0.85
-    env = env + (ground * 255.0 - env) * down_t * 0.85
+    # -- poles: converge fully to the sky / ground tones ---------------------
+    span = max(1e-3, np.pi / 2 - half_v)
+    up_t = _smoothstep((e - half_v) / span)[..., None]
+    down_t = _smoothstep((-e - half_v) / span)[..., None]
+    env = env + (zenith * 255.0 - env) * up_t
+    env = env + (ground * 255.0 - env) * down_t
+    env = _wrap_blur(env.astype(np.float32), max(1.0, env_width / 256.0))
     return np.clip(env, 0, 255).astype(np.uint8)
 
 

@@ -356,39 +356,51 @@ class WorldRequestHandler(BaseHTTPRequestHandler):
             return self._world_file(match.group(1), match.group(2))
         return self._error(HTTPStatus.NOT_FOUND, "Not found")
 
+    def _reject_post(self, status: int, message: str) -> None:
+        """Reply with an error to an upload we will not process.
+
+        The body is drained first (when plausibly sized): closing a socket
+        with unread data makes Windows, and many clients, report a
+        connection reset instead of the response. A phone with a stale token
+        would then see a network failure rather than "token missing".
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if 0 < length <= 4 * self.server.max_upload_bytes:
+            remaining = length
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 1 << 16))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        self.close_connection = True
+        self._error(status, message)
+
     def do_POST(self) -> None:  # noqa: N802
         parts = urlsplit(self.path)
         query = parse_qs(parts.query)
         if parts.path != "/api/worlds":
-            return self._error(HTTPStatus.NOT_FOUND, "Not found")
+            return self._reject_post(HTTPStatus.NOT_FOUND, "Not found")
         if not self._authorized(query):
-            return self._error(HTTPStatus.UNAUTHORIZED, "Access token missing or wrong")
+            return self._reject_post(HTTPStatus.UNAUTHORIZED, "Access token missing or wrong")
         quality = (query.get("quality") or [self.server.default_quality])[0]
         if quality not in PROFILES:
-            return self._error(HTTPStatus.BAD_REQUEST, f"quality must be one of {', '.join(PROFILES)}")
+            return self._reject_post(HTTPStatus.BAD_REQUEST, f"quality must be one of {', '.join(PROFILES)}")
         length_header = self.headers.get("Content-Length")
         if length_header is None:
-            return self._error(HTTPStatus.LENGTH_REQUIRED, "Content-Length is required")
+            return self._reject_post(HTTPStatus.LENGTH_REQUIRED, "Content-Length is required")
         try:
             length = int(length_header)
         except ValueError:
-            return self._error(HTTPStatus.BAD_REQUEST, "Bad Content-Length")
+            return self._reject_post(HTTPStatus.BAD_REQUEST, "Bad Content-Length")
         if length <= 0:
-            return self._error(HTTPStatus.BAD_REQUEST, "Empty upload")
+            return self._reject_post(HTTPStatus.BAD_REQUEST, "Empty upload")
         if length > self.server.max_upload_bytes:
-            # Answering before the body is consumed makes many clients (and
-            # Windows sockets) report a reset instead of the 413, so a
-            # plausibly sized body is drained and discarded first. Absurd
-            # sizes are not read at all.
-            if length <= 4 * self.server.max_upload_bytes:
-                remaining = length
-                while remaining > 0:
-                    chunk = self.rfile.read(min(remaining, 1 << 16))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-            self.close_connection = True
-            return self._error(
+            # Bodies up to 4x the limit are drained so the client receives the
+            # 413; absurd sizes are not read at all.
+            return self._reject_post(
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                 f"Photo is larger than {self.server.max_upload_bytes // (1024 * 1024)} MB",
             )

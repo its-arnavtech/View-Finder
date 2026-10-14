@@ -52,6 +52,9 @@
       var material = doc.materials[primitive.material] || {};
       var pbr = material.pbrMetallicRoughness || {};
       var texture = pbr.baseColorTexture ? doc.textures[pbr.baseColorTexture.index].source : -1;
+      // Keep-mask for pixel-accurate silhouettes (see gltf.py MASK_EXTRA).
+      var maskRef = material.extras && material.extras.viewfinder_mask;
+      var mask = maskRef !== undefined && maskRef !== null ? doc.textures[maskRef].source : -1;
       var indices = accessor(doc, bin, primitive.indices);
       for (var i = 0, max = 0; i < indices.length; i++) if (indices[i] > max) max = indices[i];
       if (indices.length % 3 || max >= vertexCount) fail("mesh " + mesh.name + " has invalid indices");
@@ -62,6 +65,7 @@
         colors: attributes.COLOR_0 !== undefined ? accessor(doc, bin, attributes.COLOR_0) : null,
         indices: indices,
         image: texture,
+        mask: mask,
       };
     });
 

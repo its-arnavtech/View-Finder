@@ -158,3 +158,63 @@ on camera state:
 Nine different worlds (portrait, city, street view, sky-only, synthetic and
 real-photo panoramas, landscape, a desktop-profile world on WebGL1) loaded
 with no console errors.
+
+
+## 7. Visual quality pass: the slot-canyon report
+
+The user explored a photo of The Narrows (Zion) in the browser and sent five
+views of what they saw when looking around. Their verdict was "it's bad".
+Every defect was real and reproduced.
+
+### Method
+
+The browser pane could not screenshot reliably at the time, and visual
+judgements need to be repeatable, so a small offline renderer was built:
+`benchmark-harness/world_preview.py`. It splats a world's GLB with a z-buffer
+from six fixed poses (front, look left, look right, look up, a step to the
+navigation limit, free roam). It uses the viewer's own camera model and
+field-of-view rule, honours fog and the silhouette mask, and can hide single
+layers to attribute an artifact to the layer that draws it. Every fix below
+was judged on:
+- before/after contact sheets of six photos (canyon, mountains, city,
+  lighthouse portrait, street view, dashcam), with "before" rendered from
+  the committed engine in a separate git worktree;
+- the 179-input stress harness;
+- a final check in the real WebGL viewer, on WebGL2 and on WebGL1.
+
+### Findings
+
+| # | Symptom (user's view) | Cause | Fix |
+|---|---|---|---|
+| V1 | Symmetric "Rorschach" chevrons on both canyon walls; a ghost second lighthouse; a mirrored crowd | Frame padding and the 360° surround both **mirrored** the photo outward | Padding stretches edge pixels, never mirrors. The surround is built from vertical colour profiles, with no copied image structure (architecture §3.6). Test: `test_environment_has_no_mirrored_copies_of_the_photo`. |
+| V2 | Radial "starburst" when looking up | The surround stretched the photo's top row up to the zenith | Above and below the photo the surround hands over to the whole-frame profile and converges fully to the zenith/ground tone. Test: `test_looking_up_is_a_smooth_pole_not_rays`. |
+| V3 | Flat floor with a hard horizon line | The ground disc reached 96 units, through the canyon walls, and was fogged while the surround was not | Disc radius is 2.5× the visible floor's reach, coloured from the surround, unfogged. |
+| V4 | Horizontal colour streaks dragged out of every silhouette | The hidden-background fill copied the *nearest* donor pixel (Voronoi), which extrudes straight streaks | Push-pull pyramid fill at full resolution. Donors exclude the near side of every jump. Test: `test_push_pull_fill_is_smooth_and_stays_within_the_sources`. |
+| V5 | Sawtooth silhouettes | Edge triangles were dropped whole, a staircase of grid cells | Edge cells are rebuilt flat at their near depth in a separate `silhouettes` mesh, with a per-pixel keep-mask discarding far-side texels. Silhouettes follow pixels, not the grid. Test: `test_edge_cells_are_extended_at_the_near_depth_and_kept_separate`. |
+| V6 | Found while fixing V5: "Venetian blind" stripes along the canyon wall's edge | The network draws an occlusion as a ramp several pixels wide; every grid step of it became an edge cell at a slightly different depth | Ramps are snapped into steps at pixel level, and mesh and mask read the same map. Test: `test_soft_occlusion_ramps_become_steps_but_slopes_survive`. |
+| V7 | Found while fixing V6: shards of sand glued to near rocks; a smeared hiker | Snapping by depth alone put the cut a pixel or two off the colour edge; an intermediate grid-level snap also flattened slopes | Ramp pixels are assigned near/far **by colour** (local means of confident near/far pixels), with a guided filter beforehand to align depth to colour. |
+| V8 | Found on the six-photo comparison, not the canyon: heavy horizontal streaks through Barcelona's crowd and palms | Edge cells borrowed a 3×3-max neighbourhood depth that, in clutter, belonged to a *different* nearer object, so the "flat" extension became a sheet between two objects; a 1.2 % snapping window mixed objects too | Each edge triangle extends at *its own* near corners' mean depth on private vertices; cells where three surfaces meet are cut; the ramp window is 0.6 %. |
+| V9 | Found on the comparison: a cloud touching Bermuda's left edge ran round the surround as a white stripe | Per-row profiles carry any border feature sideways | Profiles blur vertically with angular distance and hand over to the whole-frame profile. It is now a soft cloud bank, not a stripe. |
+| V10 | Build median rose from 0.65 s to 2.9 s | Gaussian blurs with sigma up to ~130 px over the whole padded canvas (`_progressive_blur`, 1.8 s of 2.85 s) | Blur only the pad strips, with three box passes per Gaussian (constant cost). Mobile builds are now 0.5–1.5 s. |
+| V11 | Flaky test (`test_upload_validation`, ~1 in 5 runs) | Real bug: POST rejections (404, **401 wrong token**, 400, 411) replied without reading the body, and Windows resets such connections, so a phone with a stale token could see a network failure instead of "token missing" | Every POST rejection drains the body first. Test: `test_rejected_uploads_still_deliver_their_error` (stable over repeated runs). |
+
+### Results
+
+- **Contact sheets (six photos, six poses each).** Every mirrored shape,
+  zenith starburst and ground-disc horizon line from "before" is gone, and
+  silhouettes no longer tear in the standard views. Remaining, at the
+  navigation limit and in free roam: small notches along thin, noisy edges
+  (dashcam tree trunks; these were also present before) and soft fills where
+  hidden areas open up. Short streaks remain just above a photo's top edge
+  when looking up.
+- **Stress harness (mobile).** 179 inputs give 177 valid worlds, 2 correct
+  rejections and 0 failures. GLB median is 1.11 MB (max 1.64 MB, budget
+  4 MB). Minimum foreground coverage rose from 0.47 to 0.96: no more
+  torn-up worlds.
+- **Real viewer.** The canyon world draws in 6 calls (201k triangles at
+  desktop quality) with `silhouettes` masked, and no console or GL errors on
+  WebGL2 and on WebGL1 (`?webgl=1`).
+- **Not done.** The single-photo limit stands. Content behind objects and
+  outside the frame is a plausible blur, not a reconstruction. Generative
+  outpainting/inpainting is the next quality step (architecture §9), and it
+  needs a much larger model.

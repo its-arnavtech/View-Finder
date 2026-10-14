@@ -36,9 +36,14 @@ def test_world_has_every_layer_and_a_valid_glb(mobile_world):
     result, _ = mobile_world
     glb = read_glb(result.glb)
     names = [mesh["name"] for mesh in glb.document["meshes"]]
-    assert names == ["dome", "sky", "ground", "background", "foreground"]
+    assert names == ["dome", "sky", "ground", "background", "foreground", "silhouettes"]
     assert glb.extras["viewfinder_world"]["schema"] == SCHEMA
-    assert len(glb.document["images"]) == 3  # photo, environment and background textures
+    # photo, environment, silhouette mask (PNG) and background textures
+    assert len(glb.document["images"]) == 4
+    mimes = [image["mimeType"] for image in glb.document["images"]]
+    assert mimes.count("image/png") == 1
+    silhouettes = glb.mesh("silhouettes")["primitives"][0]
+    assert "viewfinder_mask" in glb.document["materials"][silhouettes["material"]]["extras"]
     assert Image.open(io.BytesIO(glb.image_bytes(0))).format == "JPEG"
 
 
@@ -74,7 +79,10 @@ def test_box_occluder_is_cut_out_of_the_foreground(mobile_world):
 def test_sky_and_dome_are_not_fogged_but_geometry_is(mobile_world):
     result, _ = mobile_world
     fog = {name: layer["fog"] for name, layer in result.manifest["layers"].items()}
-    assert fog == {"dome": False, "sky": False, "ground": True, "background": True, "foreground": True}
+    assert fog == {
+        "dome": False, "sky": False, "ground": False,
+        "background": True, "foreground": True, "silhouettes": True,
+    }
 
 
 def test_progress_is_reported_in_order(mobile_world):

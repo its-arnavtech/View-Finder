@@ -65,7 +65,7 @@ def sky_colors(rgb: np.ndarray, sky: np.ndarray) -> tuple[np.ndarray, np.ndarray
 class BackgroundLayer:
     region: np.ndarray  # (gh, gw) bool: vertices the layer covers
     disparity: np.ndarray  # (gh, gw) scene disparity behind the occluders
-    rgb: np.ndarray  # (h, w, 3) uint8 texture (half the padded image size)
+    rgb: np.ndarray  # (H, W, 3) uint8 texture at the padded image size
 
 
 def occluder_pixels(pixel_disparity: np.ndarray, radius: int, jump: float) -> np.ndarray:
@@ -83,39 +83,55 @@ def occluder_pixels(pixel_disparity: np.ndarray, radius: int, jump: float) -> np
 def background_sources(pixel_disparity: np.ndarray, radius: int, jump: float) -> np.ndarray:
     """Pixels that may donate colour to the hidden background.
 
-    A pixel qualifies when nothing within ``2 * radius`` is farther than it by
-    more than ``jump``, i.e. it is not on (or near) the near side of a
-    silhouette. This excludes the occluder's own rim, so the occluder can
-    never bleed its colour into the region it hides.
+    Within a window of ``3 * radius``, a pixel on the *near* half of a
+    disparity jump (an occluder, including the interior of a thin one) is
+    excluded. Far-side pixels, and pixels with no silhouette nearby, donate.
+    The occluder therefore never bleeds its own colour into the region it
+    hides.
     """
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (4 * radius + 1, 4 * radius + 1))
-    farthest_nearby = cv2.erode(pixel_disparity.astype(np.float32), kernel)
-    return pixel_disparity - farthest_nearby <= jump
+    size = 6 * radius + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (size, size))
+    disparity = pixel_disparity.astype(np.float32)
+    nearest = cv2.dilate(disparity, kernel)
+    farthest = cv2.erode(disparity, kernel)
+    near_side = (nearest - farthest > jump) & (disparity >= (nearest + farthest) / 2)
+    return ~near_side
 
 
 def propagate_background(
     rgb: np.ndarray, unknown: np.ndarray, sources: np.ndarray
 ) -> np.ndarray:
-    """Give every ``unknown`` pixel the colour of its nearest ``sources`` pixel.
+    """Fill ``unknown`` pixels with a smooth push-pull blend of ``sources``.
 
-    One labelled distance transform (Voronoi fill) replaces an iterative flood:
-    colour streaks in from the background side of each silhouette, continuing
-    its texture. It is about 50x faster than the flood it replaced and avoids
-    the flat grey that diffusion inpainting (Telea) produces.
+    Source colours are averaged down an image pyramid, then pulled back up,
+    and each level keeps its own data where it has enough. Every hole gets
+    the local background colour at the coarsest scale that covers it: soft
+    and continuous. An earlier nearest-pixel (Voronoi) copy dragged straight
+    streaks out of every silhouette, which read as tearing when the viewer
+    moved.
     """
     if not unknown.any() or not sources.any():
         return rgb.copy()
-    # Zero pixels are the seeds; every non-zero pixel is labelled with its
-    # nearest seed. With DIST_LABEL_PIXEL, seeds are labelled 1..n in raster
-    # order, which is the order of ``rgb[sources]``.
-    seeds = np.where(sources, 0, 255).astype(np.uint8)
-    _, labels = cv2.distanceTransformWithLabels(
-        seeds, cv2.DIST_L2, 3, labelType=cv2.DIST_LABEL_PIXEL
+    weight = sources.astype(np.float32)
+    color = rgb.astype(np.float32) * weight[..., None]
+    levels = [(color, weight)]
+    while min(levels[-1][1].shape) > 4:
+        level_color, level_weight = levels[-1]
+        levels.append((cv2.pyrDown(level_color), cv2.pyrDown(level_weight)))
+    top_color, top_weight = levels[-1]
+    fallback = rgb[sources].mean(axis=0).astype(np.float32)
+    filled = np.where(
+        (top_weight > 1e-6)[..., None], top_color / np.maximum(top_weight, 1e-6)[..., None], fallback
     )
-    palette = rgb[sources]
-    filled = rgb.copy()
-    filled[unknown] = palette[labels[unknown] - 1]
-    return filled
+    for level_color, level_weight in reversed(levels[:-1]):
+        size = (level_weight.shape[1], level_weight.shape[0])
+        up = cv2.resize(filled, size, interpolation=cv2.INTER_LINEAR)
+        trust = np.clip(level_weight * 4.0, 0.0, 1.0)[..., None]
+        local = level_color / np.maximum(level_weight, 1e-6)[..., None]
+        filled = local * trust + up * (1.0 - trust)
+    out = rgb.copy()
+    out[unknown] = np.clip(filled[unknown], 0, 255).astype(np.uint8)
+    return out
 
 
 def background_layer(
@@ -155,13 +171,10 @@ def background_layer(
     hidden = np.minimum(hidden, disparity)
     layer_disparity = np.where(region, hidden, disparity).astype(np.float32)
 
-    # Colour, at half resolution: the layer's texture is stored at half size
-    # anyway, and the fill is 4x cheaper there.
-    half = (max(1, image_width // 2), max(1, image_height // 2))
-    small_rgb = cv2.resize(rgb, half, interpolation=cv2.INTER_AREA)
-    small_disparity = cv2.resize(pixel_disparity, half, interpolation=cv2.INTER_NEAREST)
+    # Colour, at full resolution: far-side texels of edge cells are shown
+    # from this layer (the foreground discards them), so it must stay sharp.
     radius = max(1, dilation_px // 2)
-    unknown = occluder_pixels(small_disparity, radius, jump)
-    sources = background_sources(small_disparity, radius, jump) & ~unknown
-    layer_rgb = propagate_background(small_rgb, unknown, sources)
+    unknown = occluder_pixels(pixel_disparity, radius, jump)
+    sources = background_sources(pixel_disparity, radius, jump) & ~unknown
+    layer_rgb = propagate_background(rgb, unknown, sources)
     return BackgroundLayer(region=region, disparity=layer_disparity, rgb=layer_rgb)

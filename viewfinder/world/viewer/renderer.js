@@ -25,7 +25,9 @@
   var FRAGMENT = [
     "precision mediump float;",
     "uniform sampler2D uTexture;",
+    "uniform sampler2D uMask;",
     "uniform float uTextured;",
+    "uniform float uMasked;",
     "uniform float uFog;",
     "uniform float uFogDensity;",
     "uniform vec3 uFogColor;",
@@ -33,6 +35,9 @@
     "varying vec4 vColor;",
     "varying float vDistance;",
     "void main() {",
+    // Silhouette cells discard the texels that belong to the far side, so
+    // edges follow the photo's pixels rather than the mesh grid.
+    "  if (uMasked > 0.5 && texture2D(uMask, vUv).r < 0.5) discard;",
     "  vec4 color = mix(vColor, texture2D(uTexture, vUv), uTextured);",
     "  float d = uFogDensity * vDistance;",
     "  float fog = uFog * (1.0 - exp(-d * d));",
@@ -108,6 +113,8 @@
       viewProjection: gl.getUniformLocation(p, "uViewProjection"),
       eye: gl.getUniformLocation(p, "uEye"),
       texture: gl.getUniformLocation(p, "uTexture"),
+      mask: gl.getUniformLocation(p, "uMask"),
+      masked: gl.getUniformLocation(p, "uMasked"),
       textured: gl.getUniformLocation(p, "uTextured"),
       fog: gl.getUniformLocation(p, "uFog"),
       fogDensity: gl.getUniformLocation(p, "uFogDensity"),
@@ -198,6 +205,7 @@
           count: indices.length,
           indexType: indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT,
           texture: mesh.image >= 0 ? textures[mesh.image] : null,
+          mask: mesh.mask >= 0 ? textures[mesh.mask] : null,
           fog: layers[mesh.name] ? !!layers[mesh.name].fog : true,
           backdrop: mesh.name in BACKDROP,
           // The ground disc is coplanar with the photo's own ground: push it
@@ -245,6 +253,7 @@
     gl.uniform1f(loc.fogDensity, env.fog.density);
     gl.uniform3fv(loc.fogColor, env.fog.color);
     gl.uniform1i(loc.texture, 0);
+    gl.uniform1i(loc.mask, 1);
     gl.activeTexture(gl.TEXTURE0);
 
     this.gpu.draws.forEach(function (draw) {
@@ -269,6 +278,12 @@
         gl.vertexAttrib4f(loc.color, 1, 1, 1, 1);
       }
       gl.uniform1f(loc.textured, draw.texture ? 1 : 0);
+      gl.uniform1f(loc.masked, draw.mask ? 1 : 0);
+      if (draw.mask) {
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, draw.mask);
+        gl.activeTexture(gl.TEXTURE0);
+      }
       gl.uniform1f(loc.fog, draw.fog ? 1 : 0);
       if (draw.texture) gl.bindTexture(gl.TEXTURE_2D, draw.texture);
       if (draw.offset) {

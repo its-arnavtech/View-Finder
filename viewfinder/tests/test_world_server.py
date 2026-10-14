@@ -171,3 +171,13 @@ def test_lan_binding_requires_a_token_by_default(tmp_path):
     finally:
         instance.runner.stop()
         instance.server_close()
+
+
+def test_rejected_uploads_still_deliver_their_error(server):
+    """Every refusal must reach the client as a status, not a reset. A wrong
+    token on a phone must read "token missing", not a network failure."""
+    body = scene_jpeg()
+    for _ in range(5):
+        assert request(server, "POST", "/api/worlds", body, token="wrongtoken")[0].status == 401
+        assert request(server, "POST", "/api/nope", body)[0].status == 404
+        assert request(server, "POST", "/api/worlds?quality=ultra", body)[0].status == 400

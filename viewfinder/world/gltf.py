@@ -44,6 +44,7 @@ LINEAR_MIPMAP_LINEAR = 9987
 CLAMP_TO_EDGE = 33071
 
 UNLIT = "KHR_materials_unlit"
+MASK_EXTRA = "viewfinder_mask"
 
 
 class GlbError(ValueError):
@@ -125,18 +126,23 @@ class GlbBuilder:
         self._textures.append({"source": len(self._images) - 1, "sampler": 0})
         return len(self._textures) - 1
 
-    def _material(self, name: str, texture: int | None) -> int:
+    def _material(self, name: str, texture: int | None, mask: int | None = None) -> int:
         pbr: dict[str, Any] = {"metallicFactor": 0.0, "roughnessFactor": 1.0}
         if texture is not None:
             pbr["baseColorTexture"] = {"index": texture}
-        self._materials.append(
-            {
-                "name": name,
-                "pbrMetallicRoughness": pbr,
-                "doubleSided": True,
-                "extensions": {UNLIT: {}},
-            }
-        )
+        material: dict[str, Any] = {
+            "name": name,
+            "pbrMetallicRoughness": pbr,
+            "doubleSided": True,
+            "extensions": {UNLIT: {}},
+        }
+        if mask is not None:
+            # A keep-mask the World Engine viewer uses to discard texels
+            # (silhouettes at pixel accuracy). Other glTF viewers ignore
+            # extras and show those texels unmasked, which is a soft fringe
+            # rather than a broken mesh.
+            material["extras"] = {MASK_EXTRA: mask}
+        self._materials.append(material)
         return len(self._materials) - 1
 
     def add_mesh(
@@ -148,11 +154,13 @@ class GlbBuilder:
         uvs: np.ndarray | None = None,
         colors: np.ndarray | None = None,
         texture: int | None = None,
+        mask: int | None = None,
     ) -> None:
         """Add one unlit triangle mesh.
 
         ``colors`` are uint8 RGBA per vertex. ``texture`` is an index returned by
-        :meth:`add_texture` and requires ``uvs``.
+        :meth:`add_texture` and requires ``uvs``; so does ``mask``, a texture
+        whose red channel is a keep-mask for the viewer.
         """
         positions = np.asarray(positions, dtype=np.float32).reshape(-1, 3)
         indices = np.asarray(indices).reshape(-1)
@@ -184,7 +192,7 @@ class GlbBuilder:
         primitive = {
             "attributes": attributes,
             "indices": index_accessor,
-            "material": self._material(name, texture),
+            "material": self._material(name, texture, mask),
             "mode": 4,
         }
         self._meshes.append(_Mesh(name=name, primitive=primitive))
