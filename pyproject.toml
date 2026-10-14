@@ -14,3 +14,7 @@ view-finder = "viewfinder.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["viewfinder*"]
+
+# The World Engine's browser viewer ships as static files inside the package.
+[tool.setuptools.package-data]
+"viewfinder.world" = ["viewer/*.html", "viewer/*.css", "viewer/*.js"]

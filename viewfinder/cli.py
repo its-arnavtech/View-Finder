@@ -35,6 +35,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     locate.add_argument("arguments", nargs=argparse.REMAINDER)
 
+    world = subcommands.add_parser(
+        "world",
+        add_help=False,
+        help="build/serve an explorable 3D world from a photo (see `world -h`)",
+    )
+    world.add_argument("arguments", nargs=argparse.REMAINDER)
+
     subcommands.add_parser("formats", help="list supported local media formats")
     subcommands.add_parser("doctor", help="check dependencies and local data readiness")
 
@@ -99,6 +106,10 @@ def run(argv: Sequence[str] | None = None) -> int:
     # Friendly convenience and backward compatibility:
     #   view-finder photo.jpg ...
     #   view-finder --input photo.jpg ...
+    if arguments[0] == "world":
+        from .world.cli import run as world
+
+        return world(arguments[1:])
     if arguments[0] not in {"locate", "formats", "doctor", "data"} and arguments[0] not in {
         "-h",
         "--help",

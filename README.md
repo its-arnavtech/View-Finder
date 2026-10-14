@@ -564,6 +564,26 @@ Supported formats depend on the installed Pillow/OpenCV decoders. Run
 extensions available in the current environment. Format detection is
 extension-based and case-insensitive.
 
+## 3D World Engine
+
+`view-finder world` turns a single photo into an explorable 3D world you can
+move through in a browser, including on a phone. It estimates depth locally
+(Depth Anything V2 Small, Apache-2.0), builds a layered mesh (foreground,
+the hidden background behind silhouettes, sky, dome and ground) and exports a
+standard `.glb` with a dependency-free WebGL viewer.
+
+```bash
+view-finder world setup                          # once: download the depth model (~100 MB)
+view-finder world build photo.jpg --html         # photo_world.glb/.json/.html
+view-finder world serve --host 0.0.0.0           # open the printed link on your phone
+```
+
+The phone path resizes photos on the device before upload and protects the
+LAN server with an access token. Everything stays on your network. See
+[docs/3d-engine/README.md](docs/3d-engine/README.md) for usage and
+[docs/3d-engine/ARCHITECTURE.md](docs/3d-engine/ARCHITECTURE.md) for how it
+works.
+
 ## Discord bot
 
 `viewfinder/discord_bot.py` is a standalone, always-on Discord process. It is
