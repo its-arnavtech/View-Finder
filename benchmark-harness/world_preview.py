@@ -66,6 +66,9 @@ def fov_for(manifest: dict, aspect: float) -> float:
     if camera.get("projection") == "cylindrical":
         return min(max(vfov * 1.25, math.radians(50)), math.radians(80))
     hfov = math.radians(camera["hfov_deg"])
+    if manifest.get("surround", {}).get("generator", "none") != "none":
+        fit = 2 * math.atan(math.tan(hfov / 2) / aspect)
+        return min(max(vfov, fit), math.radians(95))
     padded_height = manifest["source"].get("padded", [0, camera["height"]])[1]
     padded_vfov = 2 * math.atan(padded_height / 2 / camera["fy"])
     fit_width = 2 * math.atan(math.tan(hfov / 2) / aspect)

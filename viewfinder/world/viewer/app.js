@@ -19,6 +19,8 @@
     start: "Reading the photo…",
     ingest: "Estimating depth…",
     depth: "Finding sky and hidden surfaces…",
+    generate: "Imagining the world all around the photo (a few minutes)…",
+    explore: "Walking into the world and painting what it reveals…",
     layers: "Building the world around it…",
     environment: "Meshing…",
     mesh: "Packing textures…",
@@ -179,6 +181,13 @@
       return Math.min(Math.max(vfov * 1.25, 50 * Math.PI / 180), 80 * Math.PI / 180);
     }
     var hfov = camera.hfov_deg * Math.PI / 180;
+    var generated = manifest.surround && manifest.surround.generator && manifest.surround.generator !== "none";
+    if (generated) {
+      // A generated world continues past the photo on every side: frame the
+      // photo, widening on narrow screens so its width fits, up to 95°.
+      var fit = 2 * Math.atan(Math.tan(hfov / 2) / aspect);
+      return Math.min(Math.max(vfov, fit), 95 * Math.PI / 180);
+    }
     // Narrow (portrait) screens: widen vertically so more of the photo's
     // width fits, but never past the padded photo's own vertical extent;
     // beyond it there is only the plain dome and ground.
@@ -266,7 +275,7 @@
     var view = state.controls.camera();
     var fovy = fovFor(manifest);
     state.controls.fovy = fovy; // drag rotation tracks the finger at this field of view
-    state.renderer.draw({
+    var dissolving = state.renderer.draw({
       eye: view.eye,
       target: view.target,
       fovy: fovy,
@@ -278,7 +287,7 @@
     state.stats.pitch = Math.round(view.pitch * 1000) / 1000;
     updateStats(time);
     // Render on demand: keep going only while something is moving (NFR9).
-    if (animating || state.dirty) { state.dirty = false; requestFrame(); }
+    if (animating || dissolving || state.dirty) { state.dirty = false; requestFrame(); }
     else state.lastTick = 0;
   }
 

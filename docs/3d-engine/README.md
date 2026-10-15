@@ -1,34 +1,63 @@
 # World Engine: step into a photo
 
-The World Engine turns one still photo into an explorable 3D world, which you
-can view in a browser on a phone or a desktop. It estimates per-pixel depth,
-cuts the scene into layers (foreground, the hidden background behind it, the
-sky), surrounds it with a sky dome and ground, and exports a standard
-`.glb` with a dependency-free WebGL viewer.
+The World Engine turns one still photo into a 3D world you can walk into, in
+a browser on a phone or a desktop. With an NVIDIA GPU it **generates the
+world around the photo**: the full 360° from where it was taken, then what
+you see as you walk in. A room continues as an empty room, a lake shore as a
+lake shore. Without a GPU it falls back to a single-viewpoint 3D photo.
+
+How a world is made:
+
+1. Depth for the photo (Depth Anything V2), and what kind of place it is
+   (CLIP: setting, lighting, season), which sets the prompts.
+2. The 360° panorama around the photo, generated view by view by Stable
+   Diffusion XL inpainting, the photo kept pixel-exact inside it.
+3. Depth for the whole panorama; a ground prior (nothing below the horizon is
+   farther than the ground), which turns reflective water into a surface.
+4. Real scale: the eye 1.6 m above the ground.
+5. **Walking in**: every standing point (3 and 6.5 m into the photo, then
+   to either side) gets a 360° world of its own. The nearest one is rendered
+   from there on the GPU; the model fills what is missing and repaints
+   everything near (far scenery and sky are kept); depth is estimated for
+   the result and it becomes one continuous mesh. The viewer shows the
+   nearest standing point's world, so wherever you stand you see one
+   coherent surface made for that spot.
+6. A standard `.glb` with a dependency-free WebGL viewer.
 
 Like the rest of View Finder it runs locally. Photos never leave your
-computer, and the depth model is downloaded once, explicitly.
+computer, and the models are downloaded once, explicitly.
 
-- Design: [ARCHITECTURE.md](ARCHITECTURE.md)
+- Design: [ARCHITECTURE.md](ARCHITECTURE.md), the generated world in
+  [GENERATIVE.md](GENERATIVE.md) and the walkable world in
+  [EXPLORABLE-PLAN.md](EXPLORABLE-PLAN.md)
 - Product spec and phases: [PDD.md](PDD.md)
 - Self-review, feasibility spike and build findings: [PDD-REVIEW.md](PDD-REVIEW.md)
 
 ## Setup
 
-One time, with network access, download the models: Depth Anything V2
-Small (~100 MB) and LaMa inpainting (~93 MB), both Apache-2.0:
+One time, with network access, install the extras and download the models:
+Depth Anything V2 Small (~100 MB), LaMa (~93 MB), CLIP ViT-L/14 (~1.7 GB) and
+SDXL inpainting (~7 GB):
 
 ```bash
-python -m pip install -r viewfinder/requirements-world.txt   # optional: ONNX Runtime for LaMa
+python -m pip install -r viewfinder/requirements-world.txt
+```
+```bash
 view-finder world setup
 ```
 
-The engine runs on the pinned `torch`/`transformers`/`opencv`/`Pillow` stack
-in `viewfinder/requirements.txt`. ONNX Runtime is optional. With it and the
-LaMa model, the border just outside the photo and the areas that foreground
-objects hide are filled with learned texture (rock, foliage, walls, paving)
-instead of a blur. Without it, the engine falls back to those blurs, and the
-server says which it is using when it starts.
+The core runs on the pinned `torch`/`transformers`/`opencv`/`Pillow` stack in
+`viewfinder/requirements.txt`. The extras (ONNX Runtime, diffusers, moderngl)
+are what make a *generated* world; without them, or without an NVIDIA GPU,
+the engine builds the single-viewpoint 3D photo instead, and the server says
+which it is doing when it starts.
+
+**Time:** a generated desktop world takes about 20 minutes on an RTX 4060
+Laptop (8 GB) plugged in: ~5 for the 360° panorama, then ~3.5 for each of
+the four standing points you can walk to. A mobile world builds one standing
+point. On battery it is several times slower. Re-uploading the same photo reuses its panorama.
+Close memory-heavy apps: on Windows, a GPU that runs out of memory slows to a
+crawl instead of failing.
 
 ## On your phone
 
@@ -91,21 +120,28 @@ Exit codes: `0` ok, `1` engine or model failure, `2` bad input.
 | | Phone | Desktop |
 |---|---|---|
 | **Look around** (default) | drag | drag, arrow keys |
-| Move forward/back | pinch | scroll, `W`/`S` |
-| Slide | two-finger drag | right-drag or Shift-drag, `A`/`D`, `Q`/`E` |
+| Walk forward/back | pinch | `W`/`S`, scroll |
+| Step sideways | two-finger drag | `A`/`D`, right-drag or Shift-drag |
 | Reset view | double-tap / **Reset** | double-click, `R` |
 | Look by moving the phone | **Tilt** (HTTPS only) | — |
 
 Dragging turns the view a full 360° and up/down, and the scene follows your
 finger at any zoom. The eye sits slightly in front of a "neck" pivot, so
-turning also shows a little real parallax, the way turning your head does.
-When you turn away from the photo you see a surround synthesised from it,
-deliberately blurred so it never pretends to be real content.
+turning shows a little real parallax, the way turning your head does.
+
+In a **generated world** you walk at eye height (1.6 m) at walking pace,
+anywhere within reach of the standing points the world was generated
+around: typically 6–9 m into the scene and a few metres to either side. As
+you cross from one standing point's area to the next, the scene dissolves
+into the next one's version of it over about a metre: the layout and far
+scenery stay, the near detail is that point's own.
+
+In a single-viewpoint world (no GPU, or `--generate off`) movement stays in
+the small region where one photo's geometry holds up.
 
 **Orbit** (toolbar) switches a drag to circling a point in front of the
-camera, which shows the most depth. In Orbit mode, Tilt slides the camera
-like a 3D photo. Movement stays inside the region where single-photo
-geometry holds up; **Free roam** lifts that limit.
+camera. In Orbit mode, Tilt slides the camera like a 3D photo. **Free roam**
+lifts every movement limit (and shows where the world ends).
 
 ### Panoramas
 
@@ -144,18 +180,22 @@ print(result.manifest["layers"])
 
 ## What to expect
 
-One photo only records one viewpoint. The world looks exactly like the photo
-from where it was taken and shows real depth as you move around it. Behind
-foreground objects you see a plausible continuation (inpainted by LaMa when
-installed), not the true hidden content. Just past the frame's edge the
-scene carries on for a while, then fades into a soft 360° surround built
-from the photo's own colours, row by row, fading to its sky and ground tones
-overhead and underfoot. Move far enough and the missing sides of objects
-show. That is why movement is limited by default.
+From where it was taken, the world looks exactly like the photo. Everything
+else (the rest of the 360°, what is behind things, what you walk up to) is
+**invented** by the image model, consistent with the photo but not a record
+of the real place: the far shore of a lake you have never seen is a
+plausible far shore, not the real one. Generated areas are kept empty of
+people.
 
-Depth is relative, so scenes are in normalised units, not metres. Glass,
-mirrors, water reflections and very fine structure (wires, leaves against
-sky) are where monocular depth is least reliable.
+Generated worlds are in metres, scaled so the eye is 1.6 m above the
+ground. Water, glass and very fine structure (wires, leaves against the sky)
+are where depth is least reliable; the ground prior keeps water a surface.
+Walk past the explored area in Free roam and you reach the edge of the
+world, where surfaces stretch.
+
+Without the generator (no NVIDIA GPU), a world is a single-viewpoint 3D
+photo: real depth as you move a little, a plausible continuation behind
+objects (LaMa), and a soft surround built from the photo's own colours.
 
 ## Tests
 

@@ -173,9 +173,15 @@ class JobRunner:
         max_pending: int = 8,
         builder: Callable[..., Any] = build_world,
         inpainter: Any = None,
+        generator: Any = None,
+        classify: Callable[..., Any] | None = None,
+        surround_cache: Path | None = None,
     ) -> None:
+        self.surround_cache = surround_cache
         self.estimator = estimator
         self.inpainter = inpainter
+        self.generator = generator
+        self.classify = classify
         self.store = store
         self.max_pending = max_pending
         self.builder = builder
@@ -240,7 +246,10 @@ class JobRunner:
                     profile=job.quality,
                     estimator=self.estimator,
                     inpainter=self.inpainter,
+                    generator=self.generator,
+                    classify=self.classify,
                     progress=progress,
+                    **({"surround_cache": self.surround_cache} if self.surround_cache else {}),
                 )
                 world_id = uuid.uuid4().hex
                 self.store.save(world_id, result.glb, result.manifest)
@@ -253,6 +262,9 @@ class JobRunner:
                 job.status, job.error = "error", f"The world could not be built ({exc.__class__.__name__})."
             finally:
                 job.payload = None  # free the upload
+                release = getattr(self.generator, "release_memory", None)
+                if release is not None:
+                    release()
 
 
 # --------------------------------------------------------------------------
@@ -350,6 +362,7 @@ class WorldRequestHandler(BaseHTTPRequestHandler):
                     "status": "ok",
                     "depth": self.server.runner.estimator.describe(),
                     "inpainting": self.server.runner.inpainter.describe() if self.server.runner.inpainter else None,
+                    "surround": self.server.runner.generator.describe() if self.server.runner.generator else None,
                     "pending": self.server.runner.pending(),
                     "profiles": list(PROFILES),
                 },
@@ -494,11 +507,26 @@ class ServeConfig:
     tls_key: Path | None = None
 
 
-def create_server(config: ServeConfig, estimator: DepthEstimator, inpainter: Any = None) -> WorldHTTPServer:
+def create_server(
+    config: ServeConfig,
+    estimator: DepthEstimator,
+    inpainter: Any = None,
+    generator: Any = None,
+    classify: Callable[..., Any] | None = None,
+) -> WorldHTTPServer:
     needs_token = config.require_token if config.require_token is not None else not is_loopback(config.host)
     token = (config.token or new_token()) if needs_token else None
     store = WorldStore(config.store, config.max_worlds)
-    runner = JobRunner(estimator, store, max_pending=config.max_pending, inpainter=inpainter)
+    runner = JobRunner(
+        estimator,
+        store,
+        max_pending=config.max_pending,
+        inpainter=inpainter,
+        generator=generator,
+        classify=classify,
+        # Next to the world store: re-uploading a photo skips generation.
+        surround_cache=Path(config.store).parent / "surround-cache" if generator is not None else None,
+    )
     server = WorldHTTPServer(
         (config.host, config.port),
         runner,

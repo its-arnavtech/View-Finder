@@ -43,6 +43,13 @@ def build_parser() -> argparse.ArgumentParser:
             help="fill hidden areas and the frame border with LaMa: auto uses it when installed "
             "(default: %(default)s)",
         )
+        sub.add_argument(
+            "--generate",
+            choices=("auto", "on", "off"),
+            default="auto",
+            help="generate the full 360° world around the photo with an image model (SDXL, needs an "
+            "NVIDIA GPU); auto uses it when installed (default: %(default)s)",
+        )
         sub.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
     build = commands.add_parser("build", help="build a world from a photo into .glb/.json(/.html)")
@@ -69,8 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
     depth_options(serve)
 
     setup = commands.add_parser(
-        "setup", help="download the depth and inpainting models once (~100 + ~93 MB, Apache-2.0)"
+        "setup",
+        help="download the models once: depth (~100 MB), LaMa (~93 MB), scene CLIP (~1.7 GB) and "
+        "the SDXL surround generator (~7 GB)",
     )
+    setup.add_argument("--no-generator", action="store_true", help="skip the ~9 GB generator and CLIP models")
     setup.add_argument("--depth-model-id", default=DEPTH_ANYTHING_SMALL)
     setup.add_argument("-v", "--verbose", action="store_true")
     return parser
@@ -109,9 +119,31 @@ def _load_inpainter(args: argparse.Namespace):
         return None
 
 
+def _load_generator(args: argparse.Namespace):
+    """(backend, classify) for the generated surround, or (None, None).
+    ``auto`` falls back to the profile surround when the model, diffusers or
+    a GPU is missing; ``on`` insists."""
+    from .generate import GeneratorUnavailable, load_backend
+    from .scene import clip_cached, load_scene_classifier
+
+    if args.generate == "off":
+        return None, None
+    try:
+        backend = load_backend()
+    except GeneratorUnavailable as exc:
+        if args.generate == "on":
+            raise
+        logger.info("Generated surround off: %s", exc)
+        return None, None
+    # On the CPU: the GPU memory goes to the generator (CLIP takes ~1 s there).
+    classify = load_scene_classifier("cpu").classify if clip_cached() else None
+    return backend, classify
+
+
 def _build(args: argparse.Namespace) -> int:
     from .export import write_world
     from .ingest import ImageInputError
+    from .generate import GeneratorUnavailable
     from .inpaint import InpainterUnavailable
     from .pipeline import build_world
 
@@ -121,7 +153,8 @@ def _build(args: argparse.Namespace) -> int:
     try:
         estimator = _load(args)
         inpainter = _load_inpainter(args)
-    except (DepthModelUnavailable, InpainterUnavailable) as exc:
+        generator, classify = _load_generator(args)
+    except (DepthModelUnavailable, InpainterUnavailable, GeneratorUnavailable) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -131,7 +164,13 @@ def _build(args: argparse.Namespace) -> int:
 
     try:
         result = build_world(
-            args.photo, profile=args.quality, estimator=estimator, inpainter=inpainter, progress=progress
+            args.photo,
+            profile=args.quality,
+            estimator=estimator,
+            inpainter=inpainter,
+            generator=generator,
+            classify=classify,
+            progress=progress,
         )
     except ImageInputError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -157,8 +196,15 @@ def _build(args: argparse.Namespace) -> int:
 
 
 def _serve(args: argparse.Namespace) -> int:
+    import faulthandler
+
+    from .generate import GeneratorUnavailable
     from .inpaint import InpainterUnavailable
     from .server import ServeConfig, create_server, server_urls
+
+    # A crash inside a GPU driver or native library otherwise ends a
+    # long-running server with no trace at all.
+    faulthandler.enable()
 
     if bool(args.tls_cert) != bool(args.tls_key):
         print("error: --tls-cert and --tls-key must be given together", file=sys.stderr)
@@ -166,7 +212,8 @@ def _serve(args: argparse.Namespace) -> int:
     try:
         estimator = _load(args)
         inpainter = _load_inpainter(args)
-    except (DepthModelUnavailable, InpainterUnavailable) as exc:
+        generator, classify = _load_generator(args)
+    except (DepthModelUnavailable, InpainterUnavailable, GeneratorUnavailable) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     config = ServeConfig(
@@ -182,7 +229,7 @@ def _serve(args: argparse.Namespace) -> int:
         tls_key=args.tls_key,
     )
     try:
-        server = create_server(config, estimator, inpainter)
+        server = create_server(config, estimator, inpainter, generator=generator, classify=classify)
     except OSError as exc:
         print(f"error: cannot listen on {args.host}:{args.port} ({exc})", file=sys.stderr)
         return 1
@@ -200,6 +247,10 @@ def _serve(args: argparse.Namespace) -> int:
         print("Inpainting: off (rule-based fills). `view-finder world setup` installs LaMa.")
     else:
         print("Inpainting: LaMa.")
+    if generator is None:
+        print("Surround: soft colour profile. `view-finder world setup` installs the generator (needs an NVIDIA GPU).")
+    else:
+        print("Surround: generated 360° world (SDXL). Each world takes a few minutes.")
     print("Ctrl+C to stop.")
     try:
         server.serve_forever(poll_interval=0.5)
@@ -234,6 +285,23 @@ def _setup(args: argparse.Namespace) -> int:
         except Exception as exc:
             print(f"error: download failed: {exc}", file=sys.stderr)
             return 1
+    if not args.no_generator:
+        from . import generate, scene
+
+        for label, ready, fetch in (
+            ("Scene model (CLIP ViT-L/14, ~1.7 GB)", scene.clip_cached, scene.download_model),
+            ("Surround generator (SDXL inpainting, ~7 GB)", generate.models_cached, generate.download_models),
+        ):
+            if ready():
+                print(f"{label} is already installed.")
+                continue
+            print(f"Downloading {label} into the Hugging Face cache…")
+            try:
+                result = fetch()
+            except Exception as exc:
+                print(f"error: download failed: {exc}", file=sys.stderr)
+                return 1
+            installed += result if isinstance(result, list) else [result]
     try:
         import onnxruntime  # noqa: F401
     except ImportError:

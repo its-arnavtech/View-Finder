@@ -40,6 +40,14 @@ class QualityProfile:
     # Equirectangular surround texture (width, height) shown when the viewer
     # looks away from the photo. Power-of-two so WebGL1 phones can mipmap it.
     environment_size: tuple[int, int] = (1024, 512)
+    # With a generated surround (generate.py): its equirectangular texture
+    # size, and the vertex grid (columns, rows) of the 360° surround mesh.
+    # Mobile stays under 65,535 vertices for 16-bit indices.
+    surround_size: tuple[int, int] = (2048, 1024)
+    surround_grid: tuple[int, int] = (256, 128)
+    # Standing points with a generated 360° bubble of their own (explore.py),
+    # beyond the start point. Each costs a few minutes of generation.
+    explore_stations: int = 1
 
 
 PROFILES: dict[str, QualityProfile] = {
@@ -67,6 +75,9 @@ PROFILES: dict[str, QualityProfile] = {
         occlusion_dilation_fraction=0.025,
         sky_sphere_segments=32,
         environment_size=(2048, 1024),
+        surround_size=(4096, 2048),
+        surround_grid=(384, 192),
+        explore_stations=4,
     ),
     "high": QualityProfile(
         name="high",
@@ -80,6 +91,9 @@ PROFILES: dict[str, QualityProfile] = {
         occlusion_dilation_fraction=0.025,
         sky_sphere_segments=48,
         environment_size=(2048, 1024),
+        surround_size=(4096, 2048),
+        surround_grid=(512, 256),
+        explore_stations=6,
     ),
 }
 

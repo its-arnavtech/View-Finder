@@ -160,16 +160,19 @@ def test_write_world_writes_all_files(tmp_path, mobile_world):
 def test_cli_build_and_exit_codes(tmp_path, capsys):
     photo = tmp_path / "scene.jpg"
     photo.write_bytes(scene_jpeg())
+    # --generate off: with the models cached, the default would load SDXL
+    # and generate a whole world (minutes, and the GPU of any running server).
     code = world_cli(
-        ["build", str(photo), "--depth-model", "heuristic", "--quality", "mobile", "--html", "--inpaint", "none"]
+        ["build", str(photo), "--depth-model", "heuristic", "--quality", "mobile", "--html", "--inpaint", "none",
+         "--generate", "off"]
     )
     assert code == 0
     assert (tmp_path / "scene_world.glb").is_file() and (tmp_path / "scene_world.html").is_file()
     assert "World built" in capsys.readouterr().out
-    assert world_cli(["build", str(tmp_path / "missing.jpg"), "--depth-model", "heuristic"]) == 2
+    assert world_cli(["build", str(tmp_path / "missing.jpg"), "--depth-model", "heuristic", "--generate", "off"]) == 2
     junk = tmp_path / "junk.jpg"
     junk.write_bytes(b"not a jpeg")
-    assert world_cli(["build", str(junk), "--depth-model", "heuristic", "--inpaint", "none"]) == 2
+    assert world_cli(["build", str(junk), "--depth-model", "heuristic", "--inpaint", "none", "--generate", "off"]) == 2
 
 
 def test_top_level_cli_routes_world(tmp_path):
@@ -177,7 +180,10 @@ def test_top_level_cli_routes_world(tmp_path):
 
     photo = tmp_path / "scene.jpg"
     photo.write_bytes(scene_jpeg())
-    assert run(["world", "build", str(photo), "--depth-model", "heuristic", "--quality", "mobile", "--inpaint", "none"]) == 0
+    assert run([
+        "world", "build", str(photo), "--depth-model", "heuristic", "--quality", "mobile", "--inpaint", "none",
+        "--generate", "off",
+    ]) == 0
 
 
 @pytest.mark.skipif(not model_cached(), reason="Depth Anything V2 Small is not cached (run `view-finder world setup`)")

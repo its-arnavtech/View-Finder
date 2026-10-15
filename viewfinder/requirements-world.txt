@@ -1,6 +1,14 @@
-# Optional World Engine extras. The engine runs without them; with them, the
-# frame border and the areas foreground objects hide are filled by LaMa
-# (learned inpainting) instead of rule-based blurs.
+# Optional World Engine extras. The engine runs without them.
 #   python -m pip install -r viewfinder/requirements-world.txt
-#   view-finder world setup        # downloads the LaMa model (~93 MB, Apache-2.0)
+#   view-finder world setup        # downloads the models (Hugging Face cache)
+#
+# LaMa inpainting (~93 MB, Apache-2.0): fills what foreground objects hide.
 onnxruntime==1.31.0
+# The generated world: Stable Diffusion XL inpainting (~7 GB, CreativeML Open
+# RAIL++-M) on an NVIDIA GPU. diffusers 0.35 still works with
+# huggingface_hub < 1.0, which transformers 4.57 (GeoCLIP's pin) requires.
+diffusers==0.35.2
+huggingface_hub==0.36.2
+# Offscreen OpenGL: renders the world-in-progress from new standing points to
+# find what walking into it reveals (explore.py), and the walkthrough sheets.
+moderngl==5.13.0

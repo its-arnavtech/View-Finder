@@ -55,7 +55,8 @@ def validate_world(result: WorldResult) -> list[str]:
 
     for index, image in enumerate(glb.document.get("images", [])):
         with Image.open(io.BytesIO(glb.image_bytes(index))) as decoded:
-            if max(decoded.size) > max(profile.texture_long_side, profile.environment_size[0]):
+            budget = max(profile.texture_long_side, profile.environment_size[0], profile.surround_size[0])
+            if max(decoded.size) > budget:
                 problems.append(f"texture {index} is {decoded.size}, over the {profile.name} budget")
 
     if profile.name == "mobile" and len(result.glb) > MOBILE_MAX_BYTES:

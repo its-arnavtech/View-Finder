@@ -95,7 +95,9 @@ def test_cli_inpaint_auto_degrades_and_lama_insists(tmp_path, monkeypatch):
     monkeypatch.setattr(inpaint, "load_inpainter", missing)
     photo = tmp_path / "scene.jpg"
     photo.write_bytes(scene_jpeg())
-    common = ["build", str(photo), "--depth-model", "heuristic", "--quality", "mobile"]
+    # --generate off: with the models cached, the default would load SDXL
+    # and generate a whole world (minutes, and the GPU of any running server).
+    common = ["build", str(photo), "--depth-model", "heuristic", "--quality", "mobile", "--generate", "off"]
     assert world_cli(common) == 0
     assert world_cli(common + ["--inpaint", "lama"]) == 1
 

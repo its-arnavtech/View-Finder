@@ -258,3 +258,48 @@ Apache-2.0, ~93 MB), run by ONNX Runtime on the CPU (architecture §3.9).
   renderer), up from 0.5–1.5 s. `--inpaint none` restores the old speed.
 - **Tests.** 195 pass; the LaMa paths are covered by a stand-in inpainter,
   plus one real-model test.
+
+## 9. v2 and v3: a generated world, then a walkable one
+
+The user's verdicts drove both: v1 "made the image a little 3D on the
+front" (no world); v2 "only an image made 3D, no world behind it" (a
+generated 360° panorama, but a bubble you could not walk out of). Design:
+[GENERATIVE.md](GENERATIVE.md) and [EXPLORABLE-PLAN.md](EXPLORABLE-PLAN.md).
+Every finding below was measured on the user's lake photo (515×388) with the
+walkthrough renderer (`benchmark-harness/world_walk.py`), then on a canyon, a
+street and an indoor corridor.
+
+| # | Symptom | Cause | Fix |
+|---|---|---|---|
+| G1 | Generated views black | The hole was blank, and at strength 0.99 the model starts from a trace of its input | Seed holes with a push-pull continuation of the known pixels plus noise |
+| G2 | The photo framed as a picture in a wooden room | Pure noise (strength 1.0) | Same seeding |
+| G3 | Panel seams; haze growing away from the photo | Each view's blended band was discarded; smooth seeds were copied | Blend a ~5° band back with a distance ramp; colour-match each view; noise in the seed; DPM++ 2M Karras |
+| G4 | Upside-down cliff over the zenith, then a rock ceiling | One straight-up view saw treetops all round its edge | Four views tilted 50° up instead; outdoors "up" negatives exclude land |
+| G5 | Comb-like streaks near the nadir | Bilinear sampling mixed unfilled black into the known boundary | Known only where every interpolated neighbour is known, eroded a pixel |
+| G6 | A hard seam at the photo's frame | Generated content met the photo edge | A 2.5° ring inside the frame is repainted and faded; the photo's meshes stop at it |
+| G7 | ~13 GB RAM, generation paging to a crawl | Model CPU offload shuttled the 5 GB UNet every view | UNet and VAE stay on the GPU; text encoders visit it to encode a prompt (3 per world, cached) |
+| W1 | You could not walk anywhere | Navigation clamped to ±0.3 × the near-field depth around one viewpoint | Walking: stations 3, 6.5, 10 m out; the world explored from each |
+| W2 | The lake tore open as you walked | Depth networks read reflections in water (and reflected sky) as far away | Ground prior: nothing below the horizon is farther than the ground (panorama and photo) |
+| W3 | Grey smears 6 m in | A 515-px photo magnified across the screen | Texel density from the GPU render (`fwidth`); badly magnified surfaces within 5 m are repainted |
+| W4 | Patchwork of reflections on the water | The same water repainted from several stations | A surface is regenerated at most once |
+| W5 | Pale sky-coloured patches on the water | Repainted from afar at a grazing angle, where water reflects the sky | Repaint only within 5 m of the standing point |
+| W6 | Bright streaks along every ridge | Sliver fills along skylines took a rock's depth | Fills narrower than 5 px dropped; a stricter sky threshold for new holes |
+| W7 | The start view no longer exactly the photo | Repaints (preferred in depth ties) drew over it from everywhere | Repaints are *refinements*: drawn only within 1.5–3 m of where they were painted, screen-door faded (viewer and GPU renderer share the rule) |
+| W8 | Canyon walls smeared along the slot | The density test took the larger texture axis; a rubber sheet is stretched one way | The smaller axis |
+| W9 | The start view dithered | Refinements 3 m away were half faded in at the start point | The start point competes in the nearest-station rule; refinements fade out 2.5–3.5 m from their station |
+| W10 | Two stations' refinements interleaved as comb patterns | Each faded by its own distance, so neighbours overlapped | Only the nearest station's refinements show, cross-faded over 0.3 m at the boundary |
+| W11 | Unexplored stations reachable, and smeared | 16 views ran out before the far stations | Views capped per station; a station is walkable only if under 12% of its views is still hole or blur afterwards |
+| W12 | A canyon broke into shards at the walking points | One scale and shift per view put each new patch at its own depth | A smooth correction field, exact where geometry exists, spread into the holes |
+| W13 | Stations reported clean while visibly smeared | The cleanliness check rendered at a quarter of the resolution, and texel density scales with it | Checked at the generation resolution |
+| W14 | Stretched fills were never improved | "Regenerate once" also excluded fills, which look stretched from other stations | Only refinements are excluded (they show near their own station only) |
+| W15 | Smeared canyon walls passed the blur test | Even 2–3x magnification of an old texture smears at eye level; the threshold was 4x | Repaint anything within 5 m spreading a texel over more than 2 pixels |
+| W16 | Indoors and in the canyon, walls shattered into shards between patches | Each generated view brings its own monocular depth noise; up close, a corridor's few large surfaces show every mismatch | Plane prior (`planes.py`): the ground, a ceiling and up to four walls are fitted to the panorama's geometry; depth near a plane and facing like it is snapped onto it in the panorama, the photo and every walking view. Snapping slides points along their rays, so the start view is unchanged. On a synthetic corridor with 2% depth noise: 74% of points land exactly on their wall, median error 1.35% → 0.01% |
+| W17 | Looking at a corridor wall from 1.2 m showed a whole new corridor, vanishing point and all | Blurred surfaces were regenerated at full strength; with only a smear for context the model painted the prompt ("a corridor") onto the wall | Holes are generated outright; blurred surfaces are refined image-to-image at 0.45 strength (SDEdit), which keeps the wall, its doors and windows and adds detail |
+| W18 | Walking into the corridor, every view past 3 m was a shredded mosaic | About ten patches painted from different stations, plus the photo's mesh, covered the same walls, each with its own depth a few centimetres off; the depth test interleaved them in slivers (a per-patch colour render showed it) | Drawing each station's patches only near it removed the mosaic but not the shredding (W19) |
+| W19 | Still shredded with one station's patches at a time | The start bubble itself (the photo's layers, the panorama mesh) tears and melts seen from 3–6 m away; those surfaces are sharp, so no hole or blur test ever sent them to the model | A 360° bubble per station: the nearest bubble rendered from there, holes generated and everything within 50 m repainted (far scenery kept), depth estimated for the result, one continuous mesh; the viewer draws only the nearest station's bubble (EXPLORABLE-PLAN, round 2) |
+| W20 | Walking in, a Gothic stone corridor became a modern hotel hallway | The repaint (0.8) followed the prompt, "a corridor", more than the picture | CLIP also picks the style and materials of built places for every prompt ("with gothic stone arches and vaulted ceilings"); repaint at 0.7 |
+| W21 | The ground around a station looked motion-blurred | Seen from a few metres away, the start bubble's ground is magnified 5–10x: long radial streaks the repaint kept as structure | Surfaces magnified more than ~3x are blurred down to their colour layout, plus noise, before the repaint |
+| W22 | Bright blobs at depth edges in station bubbles | Each cut at a depth edge showed the start point's dome, the wrong scenery from there | Each station has its own dome, its own panorama at infinity |
+| W23 | A dotted line like a cable along every ridge, seen from the stations | From a station, the start point's dome (its panorama at infinity) peeks out beside the parallax-shifted 3D ridge, and its land mask, eroded a pixel, called the outermost ridge pixels sky; the repaint kept that thin dark sliver and made it a wire | Exploration widens the dome's (and the photo sky layer's) land mask, so the whole parallax gap is a hole and is generated; the repaint is also written over a rim of sky beyond near silhouettes, so moved edges land whole |
+| W24 | A station taking 20 minutes instead of 4; then CUDA out of memory | Generation peaked at 7.8 of 8 GB and spilled into system memory; with RAM short as well, an allocation failed and wedged the server | The VAE decodes in 512-pixel tiles (peak 6.3 GB); the cache is freed after every view and job, and an out-of-memory error retries once |
+| W25 | Two worlds screen-doored together between stations | The dissolve followed position, so stopping in the band froze it half way | The viewer switches station once another is 0.25 m nearer and dissolves over 450 ms |

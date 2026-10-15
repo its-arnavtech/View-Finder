@@ -6,7 +6,8 @@ import io
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable
 
 import cv2
 import numpy as np
@@ -41,7 +42,12 @@ from .ingest import ImageSource, load_source
 from .inpaint import Inpainter
 from .layers import background_layer, detect_sky, sky_colors
 from .mesh import MeshData, foreground_mesh, grid_triangles, silhouette_mask, sky_mesh, surface_mesh
+from .surround import land_mask, surround_layer
 from .profiles import QualityProfile, get_profile, profile_dict
+
+if TYPE_CHECKING:
+    from .generate import ViewBackend
+    from .scene import Scene
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +61,20 @@ GROUND_RADIUS = 2.4
 # The background layer is pushed back this much so it never z-fights the
 # foreground where the two overlap.
 BACKGROUND_PUSH = 1.01
+# The generated surround is cut where a triangle's disparity spread
+# exceeds this fraction of its nearest vertex's (mesh.surround_mesh).
+SURROUND_RELATIVE_JUMP = 0.3
 
 STAGES = (
-    ("ingest", 0.05),
-    ("depth", 0.30),
-    ("layers", 0.55),
-    ("environment", 0.70),
-    ("mesh", 0.85),
+    ("ingest", 0.02),
+    ("depth", 0.05),
+    # Generating the surround and exploring dominate a build when they run
+    # (minutes on a laptop GPU); both report their own progress in between.
+    ("generate", 0.50),
+    ("layers", 0.52),
+    ("environment", 0.53),
+    ("mesh", 0.55),
+    ("explore", 0.97),
     ("export", 1.0),
 )
 
@@ -101,6 +114,72 @@ def _encode_mask(keep: np.ndarray, long_side: int) -> tuple[bytes, list[int], st
     return buffer.getvalue(), [image.width, image.height], "image/png"
 
 
+def _panorama_points(disparity: np.ndarray) -> np.ndarray:
+    """(H, W, 3) points of an equirectangular inverse-distance map (inf where sky)."""
+    from .panorama import equirect_directions
+
+    directions = equirect_directions(disparity.shape[1], disparity.shape[0])
+    distance = np.where(disparity > 1e-6, 1.0 / np.maximum(disparity, 1e-6), np.inf)
+    return directions * distance[..., None]
+
+
+def _panorama_planes(disparity: np.ndarray, ground: float) -> list:
+    """The ground, a ceiling and walls in the panorama's geometry (scene units)."""
+    from .planes import fit_planes, normals_from_points
+
+    points = _panorama_points(disparity)
+    finite = np.where(np.isfinite(points), points, 0.0)
+    normals = normals_from_points(finite)
+    solid = np.isfinite(points).all(axis=-1)
+    step = (slice(None, None, 2), slice(None, None, 2))  # a quarter of the points is plenty
+    return fit_planes(points[step][solid[step]], normals[step][solid[step]], ground)
+
+
+def _snap_panorama(disparity: np.ndarray, planes: list) -> np.ndarray:
+    from .panorama import equirect_directions
+    from .planes import snap_depth
+
+    directions = equirect_directions(disparity.shape[1], disparity.shape[0]).astype(np.float32)
+    solid = disparity > 1e-6
+    distance = np.where(solid, 1.0 / np.maximum(disparity, 1e-6), 0.0).astype(np.float32)
+    snapped = snap_depth(np.zeros(3), directions, distance, planes, editable=solid)
+    return np.where(solid, 1.0 / np.maximum(snapped, 1e-6), 0.0).astype(np.float32)
+
+
+def _walk_bounds(exploration) -> dict[str, Any]:
+    """Where a walker may go: the explored stations, plus a margin (metres)."""
+    from .explore import EYE_HEIGHT
+
+    positions = [np.zeros(3)] + [s.position for s in exploration.stations if s.built]
+    reach = np.max(np.abs(np.array(positions)), axis=0) + 1.5
+    return {
+        "center": [0.0, 0.0, 0.0],
+        "half_extents": [round(float(reach[0]), 3), 0.4, round(float(reach[2]), 3)],
+        "eye_height": EYE_HEIGHT,
+        "walk": True,
+        # The viewer keeps a walker within ``reach`` metres of a point the
+        # world was generated around: elsewhere nothing was ever looked at.
+        "stations": [[round(float(p[0]), 2), round(float(p[2]), 2)] for p in positions],
+        "reach": 2.5,
+    }
+
+
+def _explore_summary(exploration, scale: float) -> dict[str, Any]:
+    if exploration is None:
+        return {"views": 0}
+    return {
+        "metres_per_unit": round(scale, 4),
+        "views": exploration.views,
+        "bubbles": len(exploration.bubbles),
+        "stations": [
+            {"position": [round(float(v), 2) for v in s.position], "views": s.views, "source": s.source,
+             "built": s.built, "seconds": round(s.seconds, 1)}
+            for s in exploration.stations
+        ],
+        "seconds": round(exploration.seconds, 1),
+    }
+
+
 def _rgb01(color: np.ndarray) -> list[float]:
     return [round(float(c), 4) for c in np.clip(color, 0.0, 1.0)]
 
@@ -111,12 +190,20 @@ def build_world(
     profile: str | QualityProfile | None = None,
     estimator: DepthEstimator | None = None,
     inpainter: Inpainter | None = None,
+    generator: "ViewBackend | None" = None,
+    classify: "Callable[[np.ndarray], Scene] | None" = None,
     progress: Progress | None = None,
+    surround_cache: "Path | None" = None,
 ) -> WorldResult:
     """Build an explorable layered 3D world from one photo.
 
-    ``inpainter`` (LaMa, see inpaint.py) outpaints the frame border and fills
-    what foreground objects hide. Without one, rule-based fills are used.
+    ``generator`` (an image model, see generate.py) invents the full 360°
+    world around the photo: a generated panorama with its own depth, meshed
+    all the way round. ``classify`` names the scene for its prompts.
+    Without a generator, the surround is the photo's soft colour profile.
+
+    ``inpainter`` (LaMa, see inpaint.py) fills what foreground objects hide,
+    and outpaints the frame border when there is no generated surround.
     """
     profile = get_profile(profile)
     estimator = estimator or load_estimator()
@@ -166,7 +253,43 @@ def build_world(
         np.median(bottom, axis=0).astype(np.float32) / 255.0 if len(bottom) else horizon * 0.6
     )
 
-    pad_y, pad_x = pad_size(height, width, profile.pad_fraction)
+    surround = None
+    ground_scene = None
+    planes: list = []
+    if generator is not None:
+        from .surround import build_surround
+
+        scene_disparity = to_scene_disparity(normalized, profile.far)
+        scene_disparity[sky] = 0.0
+        surround = build_surround(
+            photo.rgb,
+            intrinsics,
+            scene_disparity,
+            generator,
+            estimator.estimate,
+            classify,
+            progress=lambda fraction: report("generate", 0.05 + 0.45 * fraction),
+            cache_dir=surround_cache,
+        )
+        mark("generate")
+        from .explore import floor_disparity_equirect, ground_height
+
+        # Nothing below the horizon is farther than the ground: a depth
+        # network reads water reflections (and reflected sky) as far away,
+        # which tore lakes and wet streets open the moment you walked.
+        ground_scene = ground_height(surround.disparity)
+        if ground_scene is not None:
+            floor = floor_disparity_equirect(*surround.disparity.shape, ground_scene)
+            surround.disparity = np.maximum(surround.disparity, floor)
+            planes = _panorama_planes(surround.disparity, ground_scene)
+            surround.disparity = _snap_panorama(surround.disparity, planes)
+
+    if surround is not None:
+        # The generated world continues the photo on every side, so its frame
+        # needs no padding: the surround mesh meets the photo's edge.
+        pad_y = pad_x = 0
+    else:
+        pad_y, pad_x = pad_size(height, width, profile.pad_fraction)
     if intrinsics.max_pad_x() is not None:
         # A panorama's sides must not be extended past 360°; a full 360° one
         # gets no side padding at all, because its edges meet.
@@ -175,9 +298,12 @@ def build_world(
     # The 360° surround the viewer sees when looking away from the photo. The
     # frame's padding fades into exactly this, so the photo's edge meets the
     # surround without a seam.
-    environment = environment_map(
-        photo.rgb, intrinsics, profile.environment_size, zenith, ground_tone
-    )
+    if surround is not None:
+        environment = surround.texture(profile.surround_size)
+    else:
+        environment = environment_map(
+            photo.rgb, intrinsics, profile.environment_size, zenith, ground_tone
+        )
     # Sampled on a quarter-resolution ray grid: the surround is blurry, so
     # per-pixel rays would cost ~10x more for an identical result.
     canvas_size = (width + 2 * pad_x, height + 2 * pad_y)
@@ -190,7 +316,14 @@ def build_world(
     fade = cv2.resize(
         sample_environment(environment, coarse_rays), canvas_size, interpolation=cv2.INTER_LINEAR
     )
-    canvas = extend_frame(photo.rgb, normalized, sky, (pad_y, pad_x), fade_to=fade, inpainter=inpainter)
+    canvas = extend_frame(
+        photo.rgb,
+        normalized,
+        sky,
+        (pad_y, pad_x),
+        fade_to=fade,
+        inpainter=inpainter if surround is None else None,
+    )
     grid = make_grid(canvas.rgb.shape[1], canvas.rgb.shape[0], profile.grid_long)
     pixel_disparity = to_scene_disparity(canvas.disparity, profile.far)
     # Collapse soft depth ramps at occlusions into single steps. Mesh and
@@ -198,12 +331,40 @@ def build_world(
     pixel_disparity = sharpen_depth_edges(
         pixel_disparity, canvas.rgb, profile.edge_disparity_jump, grid.stride
     )
+    if ground_scene is not None:
+        # The ground prior again, on the photo: a ray below the horizon meets
+        # the ground at depth h / -y, so its disparity is at least -y / h.
+        pixel_rows = np.arange(canvas.rgb.shape[0], dtype=np.float32)
+        ray_y = -(pixel_rows - canvas_intrinsics.cy) / canvas_intrinsics.fy
+        floor_rows = np.where(ray_y < -1e-3, -ray_y / ground_scene * 0.9, 0.0).astype(np.float32)
+        pixel_disparity = np.maximum(pixel_disparity, floor_rows[:, None])
+    if planes:
+        # The same planes the panorama snapped to: walls, floor and ceiling
+        # stay one flat surface from the photo into the generated world.
+        from .planes import snap_depth
+
+        pixel_rows, pixel_columns = np.mgrid[0 : canvas.rgb.shape[0], 0 : canvas.rgb.shape[1]].astype(np.float32)
+        pixel_rays = canvas_intrinsics.rays(pixel_columns + 0.5, pixel_rows + 0.5).astype(np.float32)
+        solid = ~canvas.sky & (pixel_disparity > 1e-6)
+        snapped = snap_depth(np.zeros(3), pixel_rays, np.where(solid, 1.0 / np.maximum(pixel_disparity, 1e-6), 0.0),
+                             planes, editable=solid)
+        pixel_disparity = np.where(solid, 1.0 / np.maximum(snapped, 1e-6), pixel_disparity).astype(np.float32)
     # A 3x3 median at grid resolution removes single-vertex depth spikes
     # (grass blades, wires narrower than a grid cell) that would otherwise
     # shred the near field into slivers, while real silhouettes, which span
     # several vertices, keep their jump.
     disparity = cv2.medianBlur(grid.sample(pixel_disparity).astype(np.float32), 3)
     sky_grid = grid.sample(canvas.sky)
+    # With a generated surround, the photo's meshes stop short of its border:
+    # the surround mesh draws that ring, where generated content fades into
+    # the photo, so no hard seam is left at the frame.
+    ring_grid = np.zeros_like(sky_grid)
+    if surround is not None:
+        from .surround import photo_interior
+
+        rows, columns = np.mgrid[0:height, 0:width].astype(np.float32)
+        interior = photo_interior(intrinsics, columns, rows, np.ones((height, width), bool))
+        ring_grid = ~grid.sample(interior)
     depth = 1.0 / disparity
     positions = unproject(grid, canvas_intrinsics, depth)
     uvs = grid.uv()
@@ -250,11 +411,18 @@ def build_world(
     sky_layer = None
     if sky_grid.any():
         rays = canvas_intrinsics.rays(grid.u, grid.v)
-        sky_layer = sky_mesh(rays, uvs, sky_grid, profile.far * SKY_RADIUS, texture="photo")
+        sky_layer = sky_mesh(rays, uvs, sky_grid & ~ring_grid, profile.far * SKY_RADIUS, texture="photo")
         if sky_layer:
             meshes.append(sky_layer)
 
-    if ground.accepted:
+    if surround is not None:
+        layer = surround_layer(
+            # Cut only where the far side is ~2.5x farther (see surround_mesh).
+            surround, intrinsics, profile.surround_grid, SURROUND_RELATIVE_JUMP, profile.far
+        )
+        if layer is not None:
+            meshes.append(layer)
+    elif ground.accepted:
         # Only as far as the floor the photo actually shows, a few times
         # over. A disc reaching the horizon builds an infinite flat plain
         # through walls and hills (a slot canyon's river floor became one).
@@ -289,7 +457,7 @@ def build_world(
         background_positions,
         uvs,
         background.disparity,
-        background.region,
+        background.region & ~ring_grid,
         profile.edge_disparity_jump * 2.0,
         texture="background",
     )
@@ -298,7 +466,7 @@ def build_world(
 
     grid_rays = canvas_intrinsics.rays(grid.u, grid.v)
     foreground, silhouettes, cell_edge, cell_mid = foreground_mesh(
-        "foreground", grid_rays, uvs, disparity, ~sky_grid, profile.edge_disparity_jump, texture="photo"
+        "foreground", grid_rays, uvs, disparity, ~sky_grid & ~ring_grid, profile.edge_disparity_jump, texture="photo"
     )
     keep_mask = silhouette_mask(pixel_disparity, cell_edge, cell_mid)
     # Drop isolated keep/discard pixels so silhouettes are clean curves.
@@ -325,14 +493,82 @@ def build_world(
         warnings.append("the photo is all sky; it is shown on the sky sphere with no foreground")
     mark("mesh")
 
+    # -- 5b. exploration: generate what walking into the world reveals -------
+    scale = 1.0
+    exploration = None
+    land = land_mask(surround, profile.far) if surround is not None else None
+    if surround is not None and profile.explore_stations > 0:
+        from . import surround as surround_module
+        from .explore import explore_world
+        from .render import RendererUnavailable
+
+        images = {
+            "photo": canvas.rgb,
+            "environment": environment,
+            "background": background.rgb,
+            "photo_mask": np.where(keep_mask, 255, 0).astype(np.uint8),
+            "surround_mask": np.where(land, 255, 0).astype(np.uint8),
+        }
+        if sky.shape == canvas.rgb.shape[:2]:
+            images["photo_land"] = np.where(sky, 0, 255).astype(np.uint8)
+        try:
+            scale, exploration = explore_world(
+                meshes,
+                images,
+                cv2.resize(land.astype(np.uint8), environment.shape[1::-1], interpolation=cv2.INTER_NEAREST) > 0,
+                surround.disparity,
+                ground_scene if ground_scene is not None else 1.0,
+                generator,
+                estimator.estimate,
+                surround.scene,
+                profile.explore_stations,
+                progress=lambda fraction: report("explore", 0.55 + 0.42 * fraction),
+                planes=planes,
+                panorama_size=surround_module.PANORAMA_SIZE,
+                grid=profile.surround_grid,
+                jump=SURROUND_RELATIVE_JUMP,
+                far=profile.far,
+            )
+        except RendererUnavailable as exc:
+            warnings.append(f"no exploration (the world is seen from one point): {exc}")
+        if exploration is not None:
+            dome = next((m for m in meshes if m.name == "dome"), None)
+            for bubble in exploration.bubbles:
+                meshes.append(MeshData(
+                    bubble.name, bubble.positions, bubble.indices, uvs=bubble.uvs,
+                    texture=bubble.name, mask=f"{bubble.name}_mask",
+                ))
+                if dome is not None:
+                    # Behind each bubble its own panorama at infinity, as the
+                    # start point's dome is behind its surround: where the
+                    # bubble is cut at a depth edge, the same colours show.
+                    # The start point's dome, seen from a station, put
+                    # bright blobs of the wrong scenery in every cut.
+                    meshes.append(MeshData(
+                        f"{bubble.name}_dome", (dome.positions + bubble.station).astype(np.float32), dome.indices,
+                        uvs=dome.uvs, texture=bubble.name, fog=False,
+                    ))
+        mark("explore")
+
     # -- 6. export --------------------------------------------------------
     textures: dict[str, tuple[bytes, list[int], str]] = {
         "photo": _encode_jpeg(canvas.rgb, profile.texture_long_side, profile.jpeg_quality),
-        # Blurry by construction, so a lower JPEG quality costs nothing visible.
-        "environment": _encode_jpeg(environment, max(profile.environment_size), 80),
+        # The generated surround is real content; the profile surround is
+        # blurry by construction, so a lower JPEG quality costs nothing there.
+        "environment": _encode_jpeg(
+            environment,
+            max(environment.shape[:2]),
+            profile.jpeg_quality if surround is not None else 80,
+        ),
     }
     if silhouettes is not None:
         textures["photo_mask"] = _encode_mask(keep_mask, profile.texture_long_side)
+    if surround is not None and any(m.name == "surround" for m in meshes):
+        textures["surround_mask"] = _encode_mask(land, 2048)
+    if exploration is not None:
+        for bubble in exploration.bubbles:
+            textures[bubble.name] = _encode_jpeg(bubble.texture, profile.surround_size[0], profile.jpeg_quality)
+            textures[f"{bubble.name}_mask"] = _encode_mask(bubble.mask, 2048)
     if background_mesh:
         # Full resolution: the far-side texels of every silhouette are shown
         # from this layer, so it must be as sharp as the photo.
@@ -355,26 +591,37 @@ def build_world(
         "profile_settings": profile_dict(profile),
         "depth": estimator.describe(),
         "inpainting": inpainter.describe() if inpainter is not None else {"inpainter": "none"},
+        "surround": surround.manifest() if surround is not None else {"generator": "none"},
+        "explore": _explore_summary(exploration, scale),
+        "planes": [plane.scaled(scale).as_dict() for plane in planes],
+        # Each station's bubble and dome, and where it stands (metres). The
+        # viewer draws only the current station's meshes; every other mesh but
+        # the sky belongs to the start point (render.py station_fade).
+        "overlays": {
+            name: {"station": [round(float(v), 3) for v in bubble.station]}
+            for bubble in (exploration.bubbles if exploration is not None else [])
+            for name in (bubble.name, f"{bubble.name}_dome")
+        },
         "camera": {
             **intrinsics.as_dict(),
             "position": [0.0, 0.0, 0.0],
             "target": [0.0, 0.0, -1.0],
             "up": [0.0, 1.0, 0.0],
             "near_clip": 0.05,
-            "far_clip": round(profile.far * DOME_RADIUS * 1.5, 3),
+            "far_clip": round(profile.far * DOME_RADIUS * 1.5 * scale, 3),
         },
-        "navigation": navigation_bounds(depth, valid),
+        "navigation": _walk_bounds(exploration) if exploration is not None else navigation_bounds(depth, valid),
         "environment": {
             "sky_fraction": round(sky_fraction, 4),
             "zenith": _rgb01(zenith),
             "horizon": _rgb01(horizon),
             "up": [round(float(v), 4) for v in up],
-            "fog": {"color": _rgb01(horizon), "density": round(fog_density(profile.far), 6)},
+            "fog": {"color": _rgb01(horizon), "density": round(fog_density(profile.far * scale), 6)},
             "ground": ground.as_dict(),
             "radii": {
-                "sky": profile.far * SKY_RADIUS,
-                "dome": profile.far * DOME_RADIUS,
-                "ground": round(disc_radius, 3) if ground.accepted else 0.0,
+                "sky": profile.far * SKY_RADIUS * scale,
+                "dome": profile.far * DOME_RADIUS * scale,
+                "ground": round(disc_radius, 3) if ground.accepted and surround is None else 0.0,
             },
         },
         "layers": {mesh.name: mesh.stats() for mesh in meshes},
