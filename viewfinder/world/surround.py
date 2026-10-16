@@ -150,8 +150,11 @@ def build_surround(
 def _cache_key(rgb: np.ndarray, camera: Intrinsics, scene: Scene, backend: dict[str, str]) -> str:
     digest = hashlib.sha256()
     digest.update(np.ascontiguousarray(rgb).tobytes())
+    # Only what changes the generated pixels: the viewpoint changes depth, not
+    # prompts, so a panorama stays valid across it.
+    prompts = {k: v for k, v in asdict(scene).items() if k != "elevated"}
     digest.update(json.dumps(
-        [GENERATION_VERSION, PANORAMA_SIZE, camera.as_dict(), asdict(scene), backend], sort_keys=True
+        [GENERATION_VERSION, PANORAMA_SIZE, camera.as_dict(), prompts, backend], sort_keys=True
     ).encode())
     return digest.hexdigest()[:32]
 
@@ -187,13 +190,15 @@ def stitch_and_clean(
     known: np.ndarray,
     estimate: Callable[[np.ndarray], np.ndarray],
 ) -> np.ndarray:
-    from .panorama import stitch_disparity
+    from .panorama import separate_sky, stitch_disparity
 
     disparity = stitch_disparity(panorama, known_disparity, known, view_plan(DEPTH_VIEW_SIZE), estimate)
     # A 5x5 median removes seam speckle between views; the photo region keeps
     # its own (already conditioned) values.
     cleaned = cv2.medianBlur(disparity.astype(np.float32), 5)
-    return np.where(known, disparity, cleaned).astype(np.float32)
+    disparity = np.where(known, disparity, cleaned).astype(np.float32)
+    # The sky the depth network glued to trees and posts, back to sky.
+    return separate_sky(disparity, panorama, editable=~known)
 
 
 def surround_layer(

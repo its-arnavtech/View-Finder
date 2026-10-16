@@ -71,12 +71,21 @@ void main() {
     float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
     if (noise >= u_fade) discard;
     out_color = vec4(texture(u_texture, v_uv).rgb, 1.0);
-    // How many texels this pixel spans, along the texture's most stretched
-    // direction: well below 1 means a few texels are smeared across the
-    // screen. The minimum, not the maximum: a rubber sheet across a depth
-    // jump is stretched one way only, and the maximum hid it.
-    vec2 texels = fwidth(v_uv * vec2(textureSize(u_texture, 0)));
-    float density = min(texels.x, texels.y);
+    // How many texels a pixel spans along the screen direction in which the
+    // texture is most stretched: the smaller singular value of the
+    // screen-to-texel Jacobian. Well below 1 means a few texels are smeared
+    // across the screen. Per texture axis (fwidth), a sheet stretched
+    // diagonally, as foliage at different depths is from a few metres
+    // away, still read as sharp.
+    vec2 size = vec2(textureSize(u_texture, 0));
+    vec2 along_x = dFdx(v_uv * size);
+    vec2 along_y = dFdy(v_uv * size);
+    float a = dot(along_x, along_x);
+    float b = dot(along_x, along_y);
+    float c = dot(along_y, along_y);
+    float half_trace = 0.5 * (a + c);
+    float spread = sqrt(max(half_trace * half_trace - (a * c - b * b), 0.0));
+    float density = sqrt(max(half_trace - spread, 0.0));
     if (u_kind == 0) {
         out_depth = vec4(v_depth, 2.0, density, u_overlay ? 1.0 : 0.0);
     } else if (u_kind == 1) {

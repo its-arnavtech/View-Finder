@@ -61,6 +61,18 @@ BLUR_DENSITY = 0.5
 # (SMEAR_DENSITY), and the bubble's depth is estimated from the repainted
 # image, so the geometry follows what was painted.
 HEAL_STRENGTH = 0.7
+# Every pixel gets its own strength (generate.SDXLBackend, differential
+# diffusion): what nothing showed is generated outright, what was wiped
+# (below) nearly so, and near surfaces are repainted at HEAL_STRENGTH plus
+# this much for every repaint already behind the bubble a station starts
+# from, since each one leaves the picture a little softer, rising towards
+# WIPED_STRENGTH the more they are stretched (canopy stretched 1.5x from a
+# few metres away kept its streaks at 0.7). A single strength per view made
+# a trunk wiped down to its colours come back as a blur.
+HOLE_STRENGTH = 0.98
+WIPED_STRENGTH = 0.9
+HOP_STRENGTH = 0.05
+MAX_HEAL_STRENGTH = 0.8
 # Surfaces magnified past this many screen pixels per texel (the ground
 # around a station, seen from the start a few metres off, is magnified 5-10x)
 # are long radial streaks, which survive even 0.8 as motion blur. They are
@@ -73,6 +85,12 @@ MIN_FILL_FRACTION = 0.003
 MIN_HEAL_FRACTION = 0.03
 # Side of the cube faces the bubble's canvas is rendered from (pixels).
 FACE_SIZE = 1024
+# A station starts from the bubble with the fewest repaints behind it among
+# those within this many metres of the nearest. Each hop is another partial
+# repaint and detail softens with every one (a tree two hops from the photo
+# came out motion-blurred); a later bubble is only worth it when it is
+# clearly nearer.
+SOURCE_SLACK = 1.0
 
 
 @dataclass
@@ -152,6 +170,11 @@ STATION_PLAN: tuple[tuple[float, float], ...] = (
 )
 
 
+#: A standing point needs the panorama to see ground at least this share as
+#: near as a level ground at its distance would be.
+GROUND_SUPPORT = 0.5
+
+
 def plan_stations(
     disparity: np.ndarray,
     scale: float,
@@ -161,7 +184,10 @@ def plan_stations(
     """Standing points on the walkable ground, in ``plan`` order. A heading
     is walkable to ``clearance`` of the distance to the nearest obstacle at
     or above eye level (from the panorama's depth): walls, trees and
-    boulders block, rocks you can step past do not."""
+    boulders block, rocks you can step past do not. And there must be ground
+    there: where the panorama sees much farther than a level ground at that
+    distance would be (the edge of a cliff, a hillside over a valley), a
+    standing point would hang in the air."""
     height, width = disparity.shape
     elevation = np.pi / 2 - (np.arange(height) + 0.5) / height * np.pi
     band = (elevation >= 0.0) & (elevation < np.radians(12.0))
@@ -172,6 +198,13 @@ def plan_stations(
         nearest = float(disparity[np.ix_(band, columns)].max()) if band.any() else 0.0
         free = (1.0 / nearest) * scale if nearest > 1e-6 else float("inf")
         if distance > clearance * free:
+            continue
+        # Where a level ground at this distance is seen, and how far it is.
+        down = math.atan2(EYE_HEIGHT, distance)
+        rows = np.abs(elevation + down) < np.radians(2.0)
+        seen = float(np.median(disparity[np.ix_(rows, columns)])) if rows.any() else 0.0
+        expected = scale / math.hypot(distance, EYE_HEIGHT)
+        if seen < GROUND_SUPPORT * expected:
             continue
         yaw = math.radians(heading)
         stations.append(Station(np.array([math.sin(yaw) * distance, 0.0, -math.cos(yaw) * distance])))
@@ -236,15 +269,18 @@ def heal_canvas(
     view_size: int,
     seed: int = 0,
     progress: Callable[[int, int], None] | None = None,
+    hops: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Fill the canvas's holes and repaint its near surfaces, view by view
-    round the panorama (modifies ``canvas.rgb`` in place).
+    round the panorama (modifies ``canvas.rgb`` in place). ``hops`` is how
+    many repaints are already behind the canvas (0: rendered from the photo
+    and its panorama).
 
-    One pass per view: holes are seeded with a soft continuation plus noise
-    (generate.complete_panorama), and the holes and near surfaces are
-    repainted together at ``HEAL_STRENGTH`` (a view with holes only is
-    generated outright). Each view repaints what earlier views did not, and
-    blends over their work across a band, so views meet without a seam.
+    One pass per view with a strength per pixel: holes are seeded with a
+    soft continuation plus noise (generate.complete_panorama) and generated
+    outright, wiped smears nearly so, near surfaces repainted lightly. Each
+    view repaints what earlier views did not, and blends over their work
+    across a band, so views meet without a seam.
 
     Returns (pixels the model filled, pixels meant for repainting, views
     generated).
@@ -266,6 +302,7 @@ def heal_canvas(
     plan = view_plan(view_size)
     generated_views = 0
     band = max(4, view_size // 20)
+    near_strength = min(HEAL_STRENGTH + HOP_STRENGTH * hops, MAX_HEAL_STRENGTH)
     for index, view in enumerate(plan):
         known_view = render_view(known.astype(np.float32), view) > 0.999
         known_view = cv2.erode(known_view.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
@@ -277,9 +314,20 @@ def heal_canvas(
                 progress(index + 1, len(plan))
             continue
         direction = "up" if view.pitch_deg > 30 else ("down" if view.pitch_deg < -30 else "around")
+        if direction == "up" and not scene.enclosed:
+            # Tilted up outdoors, a station repaints treetops, cliffs and roofs
+            # that are already there. The panorama's "open sky, no trees,
+            # no land" prompt for that direction fought them into streaks.
+            direction = "around"
         image = render_view(rgb, view)
+        strength = np.zeros(hole.shape, np.float32)
         if heal:
             density = render_view(np.where(target & ~healed, canvas.density, 9.0).astype(np.float32), view)
+            # The more a surface is stretched from where it was made, the less
+            # of it to keep: full trust at a texel per pixel or better,
+            # rising to the wiped strength where it is smeared.
+            stretched = np.clip((1.0 - density) / (1.0 - SMEAR_DENSITY), 0.0, 1.0)
+            strength[todo] = (near_strength + (WIPED_STRENGTH - near_strength) * stretched)[todo]
             smeared = todo & (density < SMEAR_DENSITY)
             if smeared.any():
                 wiped = cv2.GaussianBlur(image, (0, 0), view_size / 24).astype(np.float32)
@@ -289,12 +337,15 @@ def heal_canvas(
             image = propagate_background(image, hole, known_view)
             noise = rng.normal(0.0, 12.0, image.shape).astype(np.float32)
             image = np.where(hole[..., None], np.clip(image + noise, 0, 255), image).astype(np.uint8)
+        strength[hole] = HOLE_STRENGTH
         need = hole | (todo if heal else False)
         distance = cv2.distanceTransform((~need).astype(np.uint8), cv2.DIST_L2, 5)
         grown = distance <= band
+        # The band around it is touched up like near surfaces, to blend in.
+        strength[grown & (strength == 0)] = near_strength
         generated = backend.inpaint(
             image, grown, scene.prompt(direction), scene.negative(direction), seed + index,
-            strength=HEAL_STRENGTH if heal else 0.99,
+            strength=float(strength[grown].max()), strength_map=strength,
         )
         generated = match_colours(generated, image, grown & known_view)
         ramp = np.clip(1.0 - distance / band, 0.0, 1.0)
@@ -332,10 +383,13 @@ def bubble_disparity(
     eye: np.ndarray,
     planes: list | None,
     size: tuple[int, int],
+    ground_prior: bool = True,
 ) -> np.ndarray:
     """Inverse distance (1/m) from the station for every direction of the
-    healed canvas, at ``size`` (width, height); 0 = sky."""
-    from .panorama import stitch_disparity
+    healed canvas, at ``size`` (width, height); 0 = sky. ``ground_prior``:
+    nothing below the horizon is farther than a level ground (off for views
+    from a height)."""
+    from .panorama import separate_sky, stitch_disparity
     from .surround import DEPTH_VIEW_SIZE
 
     width, height = size
@@ -356,9 +410,13 @@ def bubble_disparity(
     )
     cleaned = cv2.medianBlur(disparity.astype(np.float32), 5)
     disparity = np.where(keep, disparity, cleaned).astype(np.float32)
-    # Nothing below the horizon is farther than the ground.
-    floor = floor_disparity_equirect(height, width, EYE_HEIGHT)
-    disparity = np.where(~keep & (disparity > 0), np.maximum(disparity, floor), disparity).astype(np.float32)
+    # The sky the depth network glued to trees and posts, back to sky
+    # (panorama.separate_sky); far scenery kept as rendered stays as it is.
+    disparity = separate_sky(disparity, small(canvas.rgb, cv2.INTER_AREA), editable=~keep)
+    if ground_prior:
+        # Nothing below the horizon is farther than the ground.
+        floor = floor_disparity_equirect(height, width, EYE_HEIGHT)
+        disparity = np.where(~keep & (disparity > 0), np.maximum(disparity, floor), disparity).astype(np.float32)
     if planes:
         from .planes import snap_depth
 
@@ -403,6 +461,17 @@ def bubble_mesh(
 # -- the walk -------------------------------------------------------------
 
 
+def choose_source(eye: np.ndarray, built: list[np.ndarray], hops: list[int]) -> int:
+    """Index of the bubble a new station at ``eye`` starts from: the fewest
+    repaints from the photo among those within ``SOURCE_SLACK`` of the
+    nearest, then the nearest."""
+    gaps = [float(np.hypot(*(eye - b)[[0, 2]])) for b in built]
+    nearest = min(gaps)
+    candidates = [i for i, gap in enumerate(gaps) if gap <= nearest + SOURCE_SLACK]
+    return min(candidates, key=lambda i: (hops[i], gaps[i]))
+
+
+
 def explore_world(
     meshes: list,
     images: dict[str, np.ndarray],
@@ -415,6 +484,7 @@ def explore_world(
     budget: int,
     progress: Callable[[float], None] | None = None,
     planes: list | None = None,
+    ground_prior: bool = True,
     panorama_size: tuple[int, int] = (4096, 2048),
     grid: tuple[int, int] = (384, 192),
     jump: float = 0.3,
@@ -432,6 +502,8 @@ def explore_world(
         panorama_size, grid, jump: each bubble's texture size, mesh grid and
             relative depth jump (as the start point's surround).
         far: distance (scene units) beyond which the panorama is sky.
+        ground_prior: keep below-horizon land within a level ground (off
+            for views from a height).
 
     Returns (metres per scene unit, the exploration).
     """
@@ -472,6 +544,7 @@ def explore_world(
             renderer, stations, backend, estimate, scene, budget, progress,
             planes=[plane.scaled(scale) for plane in (planes or [])],
             panorama_size=panorama_size, grid=grid, jump=jump, sky_disparity=1.0 / (2.0 * far * scale),
+            ground_prior=ground_prior,
         )
     finally:
         renderer.release()
@@ -492,22 +565,23 @@ def explore(
     grid: tuple[int, int] = (384, 192),
     jump: float = 0.3,
     sky_disparity: float = 1e-3,
+    ground_prior: bool = True,
 ) -> Exploration:
     """Build a bubble at each station in order, ``budget`` at most. Each
-    starts from the nearest bubble already built (the start point's first),
-    so neighbours continue each other."""
+    starts from a nearby bubble already built (``choose_source``), so
+    neighbours continue each other."""
     from .surround import DEPTH_SIZE
 
     started = time.perf_counter()
     result = Exploration(stations=stations)
     built: list[np.ndarray] = [np.zeros(3)]
+    hops: list[int] = [0]  # repaints between each bubble and the photo
     view_size = panorama_size[0] // 4
     todo = stations[:budget]
     for number, station in enumerate(todo):
         clock = time.perf_counter()
         eye = station.position
-        gaps = [float(np.hypot(*(eye - b)[[0, 2]])) for b in built]
-        source = int(np.argmin(gaps))  # ties go to the start point
+        source = choose_source(eye, built, hops)
         station.source = source - 1
         canvas = render_canvas(renderer, eye, panorama_size, [built[source]], face=min(FACE_SIZE, panorama_size[0] // 4))
 
@@ -515,8 +589,10 @@ def explore(
             if progress:
                 progress((number + done / total) / len(todo))
 
-        filled, repainted, views = heal_canvas(canvas, scene, backend, view_size, seed + 100 * number, report)
-        disparity = bubble_disparity(canvas, filled | repainted, estimate, eye, planes, DEPTH_SIZE)
+        filled, repainted, views = heal_canvas(
+            canvas, scene, backend, view_size, seed + 100 * number, report, hops=hops[source]
+        )
+        disparity = bubble_disparity(canvas, filled | repainted, estimate, eye, planes, DEPTH_SIZE, ground_prior)
         bubble = bubble_mesh(f"walk{number}", eye, canvas.rgb, disparity, grid, jump, sky_disparity)
         station.views = views
         result.views += views
@@ -525,6 +601,7 @@ def explore(
             renderer.add(bubble.positions, bubble.uvs, bubble.indices, bubble.texture,
                          np.where(bubble.mask, 255, 0).astype(np.uint8), station=eye)
             built.append(eye.copy())
+            hops.append(hops[source] + 1)
             station.built = True
         station.seconds = time.perf_counter() - clock
         logger.info("station %s: %d views, %.0f s", np.round(eye, 1), views, station.seconds)

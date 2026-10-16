@@ -30,7 +30,7 @@ class FlatBackend:
         self.color = np.array(color, np.uint8)
         self.prompts = []
 
-    def inpaint(self, image, mask, prompt, negative, seed, strength=0.99):
+    def inpaint(self, image, mask, prompt, negative, seed, strength=0.99, strength_map=None):
         self.prompts.append((prompt, negative))
         out = image.copy()
         out[mask] = self.color
@@ -232,3 +232,33 @@ def test_a_built_places_style_is_in_every_prompt():
         assert "gothic stone arches" in gothic.prompt(direction)
     assert gothic.as_dict()["style"] == gothic.style
     assert "  " not in GENERIC.prompt()  # no style, no gap
+
+
+def test_sky_glued_to_a_tree_is_given_back_to_the_sky():
+    from viewfinder.world.panorama import separate_sky
+
+    height, width = 128, 256
+    rgb = np.zeros((height, width, 3), np.uint8)
+    rgb[:] = (110, 160, 230)  # blue sky
+    rgb[64:] = (90, 80, 60)  # ground below the horizon
+    disparity = np.zeros((height, width), np.float32)
+    disparity[64:] = 0.5
+    disparity[30:64, 100:140] = 0.2  # the depth network's tree: crown and a halo, one plateau
+    rgb[38:64, 110:130] = (60, 110, 40)  # the crown itself is green
+    out = separate_sky(disparity, rgb)
+    assert out[34, 102] == 0.0 and out[45, 135] == 0.0  # sky-coloured halo: sky again
+    assert (out[40:60, 112:128] == 0.2).all()  # the crown keeps its depth
+    assert (out[64:] == 0.5).all()  # nothing below the horizon changes
+    indoors = np.full((height, width), 0.3, np.float32)  # no sky anywhere
+    assert (separate_sky(indoors, rgb) == indoors).all()
+
+
+def test_the_viewpoint_does_not_invalidate_a_generated_panorama():
+    from dataclasses import replace
+
+    camera = intrinsics_for(320, 240)
+    rgb = np.full((240, 320, 3), 128, np.uint8)
+    ground = Scene("a mountain valley", "nature", "on a sunny day", 0.9)
+    high = replace(ground, elevated=True)
+    assert surround._cache_key(rgb, camera, ground, {}) == surround._cache_key(rgb, camera, high, {})
+    assert high.as_dict()["elevated"] is True

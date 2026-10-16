@@ -55,10 +55,19 @@ class ViewBackend(Protocol):
     name: str
 
     def inpaint(
-        self, image: np.ndarray, mask: np.ndarray, prompt: str, negative: str, seed: int, strength: float = 0.99
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+        prompt: str,
+        negative: str,
+        seed: int,
+        strength: float = 0.99,
+        strength_map: np.ndarray | None = None,
     ) -> np.ndarray:
         """Fill ``mask`` (True = generate) in the square RGB ``image``. A low
-        ``strength`` keeps the image's structure and only adds detail."""
+        ``strength`` keeps the image's structure and only adds detail;
+        ``strength_map`` (0..1 per pixel) sets it pixel by pixel instead. A
+        backend that cannot vary it may use the map's maximum."""
         ...
 
     def describe(self) -> dict[str, str]: ...
@@ -148,7 +157,14 @@ class SDXLBackend:
         return self._embeddings[key]
 
     def inpaint(
-        self, image: np.ndarray, mask: np.ndarray, prompt: str, negative: str, seed: int, strength: float = 0.99
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+        prompt: str,
+        negative: str,
+        seed: int,
+        strength: float = 0.99,
+        strength_map: np.ndarray | None = None,
     ) -> np.ndarray:
         from PIL import Image
 
@@ -156,6 +172,10 @@ class SDXLBackend:
         torch = self._torch
         with self._lock:
             embeds, negative_embeds, pooled, negative_pooled = self._embed(prompt, negative)
+            callback = None
+            if strength_map is not None and mask.any():
+                strength = float(np.clip(strength_map[mask].max(), 0.05, 1.0))
+                callback = self._differential(image, strength_map, strength, seed)
             # The UNet nearly fills an 8 GB card. Windows usually spills past
             # that into system memory, but when RAM is short too an
             # allocation fails outright; freeing the allocator's cache and
@@ -175,6 +195,8 @@ class SDXLBackend:
                         guidance_scale=self.guidance,
                         strength=strength,
                         generator=torch.Generator("cpu").manual_seed(seed),
+                        callback_on_step_end=callback,
+                        callback_on_step_end_tensor_inputs=["latents"] if callback else None,
                     ).images[0]
                     break
                 except (torch.OutOfMemoryError, RuntimeError) as exc:
@@ -185,6 +207,46 @@ class SDXLBackend:
                     torch.cuda.empty_cache()
             torch.cuda.empty_cache()  # no fragmentation building up view after view
         return np.asarray(result.convert("RGB").resize((size, size)))
+
+    def _differential(self, image: np.ndarray, strength_map: np.ndarray, strength: float, seed: int):
+        """A step callback giving every pixel its own strength (differential
+        diffusion, Levin & Fried 2023). Denoising starts at the map's highest
+        strength; a pixel with a lower one is held to the original image,
+        noised to the current level, until its own start step, so it keeps
+        that much more of what was there. One pass, any mix of strengths:
+        holes generated outright beside surfaces only touched up."""
+        from PIL import Image
+
+        torch = self._torch
+        pipe = self._pipe
+        size = image.shape[0]
+        pixels = pipe.image_processor.preprocess(Image.fromarray(image), height=size, width=size)
+        with torch.inference_mode():
+            pixels = pixels.to(self.device, dtype=pipe.vae.dtype)
+            original = pipe.vae.encode(pixels).latent_dist.mean * pipe.vae.config.scaling_factor
+        generator = torch.Generator("cpu").manual_seed(seed + 1)
+        noise = torch.randn(original.shape, generator=generator).to(self.device, dtype=original.dtype)
+        latent_size = original.shape[-1]
+        per_latent = cv2.resize(strength_map.astype(np.float32), (latent_size, latent_size), interpolation=cv2.INTER_AREA)
+        # The step each pixel starts at, counted from the first step taken:
+        # int(), as diffusers truncates the schedule for img2img.
+        steps = self.steps
+        start = int(steps * strength) - np.floor(steps * np.clip(per_latent, 0.0, 1.0)).astype(np.int64)
+        start = torch.from_numpy(start).to(self.device)
+
+        def on_step_end(pipeline, index, timestep, kwargs):
+            latents = kwargs["latents"]
+            frozen = start > index  # not yet started after this step
+            if bool(frozen.any()) and index + 1 < pipeline.num_timesteps:
+                # The latents now sit at the next timestep of the schedule.
+                schedule = pipeline.scheduler.timesteps
+                first = getattr(pipeline.scheduler, "begin_index", None) or 0
+                following = schedule[min(first + index + 1, len(schedule) - 1)]
+                level = pipeline.scheduler.add_noise(original, noise, following.reshape(1))
+                kwargs["latents"] = torch.where(frozen[None, None], level.to(latents.dtype), latents)
+            return kwargs
+
+        return on_step_end
 
     def release_memory(self) -> None:
         """Return cached GPU memory between worlds."""

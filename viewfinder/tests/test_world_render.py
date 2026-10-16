@@ -88,3 +88,28 @@ def test_magnified_textures_report_low_density():
     frame = r.render(Camera.looking(np.zeros(3), 0.0, 0.0, 60.0, 128, 128))
     assert frame.density[64, 64] < 0.1
     r.release()
+
+
+def test_a_sheet_stretched_diagonally_reads_as_smeared():
+    try:
+        r = WorldRenderer()
+    except RendererUnavailable as exc:
+        pytest.skip(f"no OpenGL: {exc}")
+    # 256 texels across a quad seen square-on: sharp (about 2 texels per pixel).
+    sharp = np.full((256, 256, 3), 90, np.uint8)
+    positions, uvs, indices = _quad(-1.0, 0.6)
+    r.add(positions, uvs, indices, sharp)
+    camera = Camera.looking(np.zeros(3), 0.0, 0.0, 60.0, 128, 128)
+    assert r.render(camera).density[64, 64] > 1.0
+    r.release()
+    # A long thin strip on the screen diagonal, whose few texels along it run
+    # diagonally through the texture too (u and v both change along it):
+    # badly magnified one way, which per-axis widths (both dominated by the
+    # many texels across the strip) never showed.
+    r = WorldRenderer()
+    long = np.array([[-0.6, -0.6, -1.0], [-0.55, -0.65, -1.0], [0.65, 0.55, -1.0], [0.6, 0.6, -1.0]], np.float32)
+    strip = np.array([[0.15, 0.85], [0.85, 0.15], [0.92, 0.22], [0.22, 0.92]], np.float32)
+    r.add(long, strip, indices, sharp)
+    frame = r.render(camera)
+    assert 0.0 < frame.density[64, 64] < 0.35
+    r.release()

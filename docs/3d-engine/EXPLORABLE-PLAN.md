@@ -135,19 +135,24 @@ blur test found them, and no patch was ever painted over them.
 **Fix: a bubble per station.** Every station gets what the start point
 has, a complete 360° world of its own:
 
-1. render the nearest existing bubble from the station all the way round
-   (six cube faces into an equirectangular canvas);
+1. render a nearby bubble from the station all the way round (six cube
+   faces into an equirectangular canvas): the one with the fewest repaints
+   behind it, unless another is a metre nearer;
 2. repaint, view by view round the panorama (the same 11 views as the start
-   panorama): holes are seeded and generated, and everything within 50 m is
-   repainted image-to-image at 0.7 in the same pass, with surfaces
-   magnified more than ~3x first wiped down to their colours. The layout
-   survives; the tears, smears and melt do not. Far scenery and sky are
-   kept, so they match the start view. Each view blends over its
-   neighbours' work across a band, and over a rim of sky beyond near
-   silhouettes, so neither views nor skylines show a seam;
+   panorama), one pass per view with a strength per pixel (differential
+   diffusion): holes are seeded and generated outright (0.98), surfaces
+   magnified more than ~3x are wiped down to their colours and repainted
+   nearly so (0.9), and everything else within 50 m is repainted
+   image-to-image (0.7, plus 0.05 for every repaint already behind the
+   source bubble). The layout survives; the tears, smears and melt do not.
+   Far scenery and sky are kept, so they match the start view. Each view
+   blends over its neighbours' work across a band, and over a rim of sky
+   beyond near silhouettes, so neither views nor skylines show a seam;
 3. depth for the repainted canvas from Depth Anything, each view aligned to
-   the rendered depth (right in scale, torn in detail), then the ground and
-   plane priors;
+   the rendered depth (right in scale, torn in detail); sky the network
+   glued to trees and posts given back to the sky by colour
+   (`panorama.separate_sky`); then the ground prior (not from a height) and
+   the plane prior;
 4. one continuous mesh from the station, like the start point's surround,
    with the station's own panorama as a dome behind it.
 

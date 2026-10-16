@@ -245,6 +245,67 @@ def stitch_disparity(
     return result
 
 
+#: Sky colours are summarised by this many clusters, and a pixel this close
+#: to one of them (CIE Lab distance) is sky-coloured.
+SKY_CLUSTERS = 12
+SKY_COLOUR_DISTANCE = 12.0
+
+
+def separate_sky(
+    disparity: np.ndarray,
+    rgb: np.ndarray,
+    editable: np.ndarray | None = None,
+    band_fraction: float = 0.03,
+) -> np.ndarray:
+    """``disparity`` (equirectangular, 0 = sky) with sky-coloured pixels at
+    the edge of the land above the horizon turned back into sky.
+
+    A monocular depth network gives the sky around and through a tree's crown
+    (and beside a post, a roof, a rock) the object's own depth: one flat
+    plateau, so no depth test finds it. Meshed, that halo of sky is glued to
+    the object, and from a few metres away it detaches as patches of
+    shifted cloud and confetti in the crown. Colour separates them: the
+    confident sky (far from any land) is summarised as a palette, and land
+    pixels near the sky that match it are sky. Calling a little land sky
+    costs little (it shows at infinity, where far land nearly is); sky glued
+    to near land tears as soon as you move. Indoors there is no confident
+    sky, and nothing changes.
+
+    ``editable`` limits which pixels may change (default all).
+    """
+    height, width = disparity.shape
+    land = disparity > 0
+    band = max(2, int(band_fraction * width))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * band + 1, 2 * band + 1))
+    sky_core = ~cv2.dilate(land.astype(np.uint8), kernel).astype(bool)
+    if sky_core.sum() < 500:
+        return disparity
+    above = (np.arange(height) < height // 2)[:, None]
+    rim = land & cv2.dilate((~land).astype(np.uint8), kernel).astype(bool) & above
+    if editable is not None:
+        rim &= editable
+    if not rim.any():
+        return disparity
+    if rgb.shape[:2] != disparity.shape:
+        rgb = cv2.resize(rgb, (width, height), interpolation=cv2.INTER_AREA)
+    lab = cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2LAB).astype(np.float32)
+    lab[..., 0] *= 100.0 / 255.0
+    lab[..., 1:] -= 128.0
+    samples = lab[sky_core]
+    if len(samples) > 20000:
+        samples = samples[np.random.default_rng(0).choice(len(samples), 20000, replace=False)]
+    clusters = min(SKY_CLUSTERS, len(samples))
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
+    _, _, centres = cv2.kmeans(samples, clusters, None, criteria, 2, cv2.KMEANS_PP_CENTERS)
+    pixels = lab[rim]
+    nearest = np.min(np.linalg.norm(pixels[:, None, :] - centres[None, :, :], axis=-1), axis=1)
+    out = disparity.copy()
+    rows, columns = np.nonzero(rim)
+    to_sky = nearest < SKY_COLOUR_DISTANCE
+    out[rows[to_sky], columns[to_sky]] = 0.0
+    return out
+
+
 def blend_view(
     panorama: np.ndarray,
     known: np.ndarray,

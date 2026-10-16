@@ -190,6 +190,9 @@ people.
 Generated worlds are in metres, scaled so the eye is 1.6 m above the
 ground. Water, glass and very fine structure (wires, leaves against the sky)
 are where depth is least reliable; the ground prior keeps water a surface.
+Photos taken from a height (a hillside, a rooftop) are recognised and keep
+the land below far away, and a standing point is only placed where there
+is ground to stand on.
 Walk past the explored area in Free roam and you reach the edge of the
 world, where surfaces stretch.
 

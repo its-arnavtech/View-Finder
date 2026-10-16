@@ -5,6 +5,7 @@ from viewfinder.world.explore import (
     EYE_HEIGHT,
     HEAL_DISTANCE,
     HEAL_STRENGTH,
+    HOLE_STRENGTH,
     Canvas,
     bubble_disparity,
     bubble_mesh,
@@ -96,8 +97,9 @@ class _RecordingBackend:
     def __init__(self):
         self.calls = []
 
-    def inpaint(self, image, mask, prompt, negative, seed, strength=0.99):
+    def inpaint(self, image, mask, prompt, negative, seed, strength=0.99, strength_map=None):
         self.calls.append((float(mask.mean()), strength))
+        self.maps = getattr(self, "maps", []) + [strength_map]
         out = image.copy()
         stripes = np.zeros(image.shape[:2], np.uint8)
         stripes[:, ::2] = 120  # texture survives colour matching, a flat colour would not
@@ -127,8 +129,11 @@ def test_heal_fills_holes_and_repaints_only_what_is_near():
     far_before = canvas.rgb[54:64].copy()
     backend = _RecordingBackend()
     filled, repainted, views = heal_canvas(canvas, GENERIC, backend, 64)
-    strengths = {strength for _, strength in backend.calls}
-    assert strengths == {0.99, HEAL_STRENGTH}  # holes outright, near surfaces image-to-image
+    strengths = {round(strength, 3) for _, strength in backend.calls}
+    assert strengths == {HOLE_STRENGTH, HEAL_STRENGTH}  # views with holes, views with near surfaces only
+    # Per pixel: holes generated outright, near surfaces repainted lightly.
+    behind = next(m for m in backend.maps if np.isclose(m.max(), HOLE_STRENGTH))
+    assert {round(float(v), 3) for v in np.unique(behind[behind > 0])} <= {HOLE_STRENGTH, HEAL_STRENGTH}
     assert views == len(backend.calls)
     assert filled[100, 5] and not filled[100, 128]
     assert repainted[100, 128] and not repainted[58, 128] and not repainted[10, 128]
@@ -175,13 +180,13 @@ def test_badly_magnified_streaks_are_wiped_before_the_repaint():
     class Seen(_RecordingBackend):
         inputs = []
 
-        def inpaint(self, image, mask, prompt, negative, seed, strength=0.99):
+        def inpaint(self, image, mask, prompt, negative, seed, strength=0.99, strength_map=None):
             self.inputs.append((image.copy(), strength))
-            return super().inpaint(image, mask, prompt, negative, seed, strength)
+            return super().inpaint(image, mask, prompt, negative, seed, strength, strength_map)
 
     backend = Seen()
     heal_canvas(canvas, GENERIC, backend, 64)
-    image = next(image for image, strength in backend.inputs if strength == HEAL_STRENGTH)
+    image = next(image for image, strength in backend.inputs if strength >= HEAL_STRENGTH)
     # The repaint saw the ground's colour, not its streaks.
     assert np.abs(np.diff(image[56:, 20:44, 1].astype(int), axis=1)).mean() < 60
 
@@ -193,3 +198,78 @@ def test_the_sky_just_beyond_a_near_silhouette_is_repainted_with_it():
     _, repainted, _ = heal_canvas(canvas, GENERIC, _RecordingBackend(), 64)
     assert repainted[30, 120] and repainted[30, 98] and repainted[18, 120]  # the rock and a rim of sky
     assert not repainted[30, 60] and not repainted[5, 120]  # not the open sky
+
+
+def test_stations_start_from_the_least_repainted_bubble_nearby():
+    from viewfinder.world.explore import choose_source
+
+    built = [np.zeros(3), np.array([0.0, 0.0, -3.0])]
+    hops = [0, 1]
+    # Equally near the photo's bubble and a repainted one: the photo's.
+    assert choose_source(np.array([-2.6, 0.0, -1.5]), built, hops) == 0
+    # Much nearer a repainted one (6.5 m from the photo, 3.5 m from it): that one.
+    assert choose_source(np.array([0.0, 0.0, -6.5]), built, hops) == 1
+
+
+def test_each_repaint_behind_a_station_strengthens_its_repaint():
+    from viewfinder.world.explore import HOP_STRENGTH, MAX_HEAL_STRENGTH
+
+    seen = {}
+    for hops in (0, 1, 5):
+        backend = _RecordingBackend()
+        canvas = _canvas()
+        canvas.coverage[canvas.coverage == HOLE] = SOLID  # near surfaces only
+        canvas.distance[canvas.coverage == SOLID] = np.maximum(canvas.distance[canvas.coverage == SOLID], 4.0)
+        heal_canvas(canvas, GENERIC, backend, 64, hops=hops)
+        seen[hops] = max(strength for _, strength in backend.calls)
+    assert seen[0] == pytest.approx(HEAL_STRENGTH)
+    assert seen[1] == pytest.approx(HEAL_STRENGTH + HOP_STRENGTH)
+    assert seen[5] == pytest.approx(MAX_HEAL_STRENGTH)
+
+
+def test_no_standing_point_hangs_over_a_drop():
+    # Standing on a hilltop: level ground for 2 m, then a valley far below.
+    h = 0.5  # scene units; EYE_HEIGHT / 0.5 = 3.2 m per unit
+    directions = equirect_directions(360, 180)
+    y = directions[..., 1]
+    horizontal = np.hypot(directions[..., 0], directions[..., 2])
+    to_ground = np.where(y < 0, h / np.maximum(-y, 1e-6), np.inf)
+    edge = 2.0 / 3.2  # the ground ends 2 m out
+    beyond = to_ground * horizontal > edge
+    distance = np.where(beyond & (y < 0), 300.0, to_ground)  # the valley, far below
+    overlook = np.where(np.isfinite(distance), 1.0 / distance, 0.0).astype(np.float32)
+    assert plan_stations(overlook, EYE_HEIGHT / h) == []
+    flat = _level_ground_panorama(h=h, wall=40.0)
+    assert plan_stations(flat, EYE_HEIGHT / h)  # the same spots on level ground are fine
+
+
+def test_outdoor_stations_never_paint_treetops_with_the_open_sky_prompt():
+    class Prompts(_RecordingBackend):
+        seen = []
+
+        def inpaint(self, image, mask, prompt, negative, seed, strength=0.99, strength_map=None):
+            self.seen.append(negative)
+            return super().inpaint(image, mask, prompt, negative, seed, strength, strength_map)
+
+    canvas = _canvas()
+    canvas.coverage[:30] = SOLID  # near treetops overhead
+    canvas.distance[:30] = 8.0
+    backend = Prompts()
+    heal_canvas(canvas, GENERIC, backend, 64)
+    assert backend.seen and not any("trees" in negative for negative in backend.seen)
+
+
+def test_the_more_a_surface_is_stretched_the_less_of_it_is_kept():
+    from viewfinder.world.explore import WIPED_STRENGTH
+
+    canvas = _canvas()
+    canvas.coverage[canvas.coverage == HOLE] = SOLID
+    canvas.distance[:] = np.where(canvas.coverage == SOLID, 4.0, 0.0)
+    canvas.density[64:, :128] = 0.65  # stretched 1.5x
+    canvas.density[64:, 128:] = 2.0  # sharp
+    backend = _RecordingBackend()
+    heal_canvas(canvas, GENERIC, backend, 64)
+    values = np.concatenate([m[m > 0] for m in backend.maps])
+    assert values.min() == pytest.approx(HEAL_STRENGTH, abs=1e-3)  # the sharp half
+    middle = values[(values > HEAL_STRENGTH + 0.01) & (values < WIPED_STRENGTH - 0.01)]
+    assert middle.size  # the stretched half, in between

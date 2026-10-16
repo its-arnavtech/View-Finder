@@ -255,6 +255,7 @@ def build_world(
 
     surround = None
     ground_scene = None
+    ground_prior = True
     planes: list = []
     if generator is not None:
         from .surround import build_surround
@@ -276,11 +277,15 @@ def build_world(
 
         # Nothing below the horizon is farther than the ground: a depth
         # network reads water reflections (and reflected sky) as far away,
-        # which tore lakes and wet streets open the moment you walked.
+        # which tore lakes and wet streets open the moment you walked. Not
+        # from a height, though: there the land below the horizon is far
+        # below, and the prior flattened a valley into a plain at your feet.
         ground_scene = ground_height(surround.disparity)
+        ground_prior = not surround.scene.elevated
         if ground_scene is not None:
-            floor = floor_disparity_equirect(*surround.disparity.shape, ground_scene)
-            surround.disparity = np.maximum(surround.disparity, floor)
+            if ground_prior:
+                floor = floor_disparity_equirect(*surround.disparity.shape, ground_scene)
+                surround.disparity = np.maximum(surround.disparity, floor)
             planes = _panorama_planes(surround.disparity, ground_scene)
             surround.disparity = _snap_panorama(surround.disparity, planes)
 
@@ -331,7 +336,7 @@ def build_world(
     pixel_disparity = sharpen_depth_edges(
         pixel_disparity, canvas.rgb, profile.edge_disparity_jump, grid.stride
     )
-    if ground_scene is not None:
+    if ground_scene is not None and ground_prior:
         # The ground prior again, on the photo: a ray below the horizon meets
         # the ground at depth h / -y, so its disparity is at least -y / h.
         pixel_rows = np.arange(canvas.rgb.shape[0], dtype=np.float32)
@@ -524,6 +529,7 @@ def build_world(
                 profile.explore_stations,
                 progress=lambda fraction: report("explore", 0.55 + 0.42 * fraction),
                 planes=planes,
+                ground_prior=ground_prior,
                 panorama_size=surround_module.PANORAMA_SIZE,
                 grid=profile.surround_grid,
                 jump=SURROUND_RELATIVE_JUMP,

@@ -139,10 +139,23 @@ STYLES: tuple[str, ...] = (
     "with asphalt and grass verges",
 )
 
+# Outdoors only: where the photo was taken from. From a height (a hillside,
+# a tower, an aircraft) what lies below the horizon can be far below, and the
+# ground prior (nothing below the horizon beyond a level ground at eye
+# height) would flatten a valley into a plain at your feet.
+VIEWPOINTS: tuple[tuple[str, bool], ...] = (
+    ("a photo taken standing on the ground", False),
+    ("a photo taken at eye level on a street, path or shore", False),
+    ("a photo taken from a high viewpoint looking down over a valley far below", True),
+    ("a photo taken from the top of a tall building looking down over a city", True),
+    ("an aerial photo taken from an airplane window", True),
+)
+
 NEGATIVE = (
     "people, person, crowd, human, man, woman, child, figure, face, animal, "
     "text, letters, watermark, logo, signature, frame, border, collage, split screen, "
-    "blurry, out of focus, distorted, deformed, lowres, jpeg artifacts, cartoon, painting, illustration"
+    "blurry, out of focus, motion blur, smeared, streaks, bokeh, depth of field, "
+    "distorted, deformed, lowres, jpeg artifacts, cartoon, painting, illustration"
 )
 
 
@@ -154,6 +167,7 @@ class Scene:
     confidence: float
     season: str = ""  # outdoors only, e.g. "in autumn with autumn foliage"
     style: str = ""  # built places only, e.g. "with gothic stone arches and vaulted ceilings"
+    elevated: bool = False  # outdoors, seen from well above the ground below the horizon
 
     @property
     def enclosed(self) -> bool:
@@ -206,6 +220,7 @@ class Scene:
             "lighting": self.lighting,
             "season": self.season,
             "style": self.style,
+            "elevated": self.elevated,
             "confidence": round(self.confidence, 3),
             "prompt": self.prompt(),
         }
@@ -228,6 +243,7 @@ class SceneClassifier:
         self._lighting = self._encode_text([f"a photo taken {phrase}" for phrase in LIGHTING])
         self._seasons = self._encode_text([f"a landscape photo taken {phrase}" for phrase in SEASONS])
         self._styles = self._encode_text([f"a photo of a place {phrase}" for phrase in STYLES])
+        self._viewpoints = self._encode_text([phrase for phrase, _ in VIEWPOINTS])
         self._lock = threading.Lock()
 
     def _encode_text(self, texts: list[str]):
@@ -247,6 +263,7 @@ class SceneClassifier:
             light_p = (100.0 * image @ self._lighting.T).softmax(dim=-1)[0].cpu().numpy()
             season_p = (100.0 * image @ self._seasons.T).softmax(dim=-1)[0].cpu().numpy()
             style_p = (100.0 * image @ self._styles.T).softmax(dim=-1)[0].cpu().numpy()
+            viewpoint_p = (100.0 * image @ self._viewpoints.T).softmax(dim=-1)[0].cpu().numpy()
         best = int(np.argmax(place_p))
         phrase, setting = PLACES[best]
         lighting = LIGHTING[int(np.argmax(light_p))]
@@ -259,7 +276,9 @@ class SceneClassifier:
             lighting = LIGHTING[max(outdoor, key=lambda i: light_p[i])]
         season = "" if enclosed else SEASONS[int(np.argmax(season_p))]
         style = STYLES[int(np.argmax(style_p))] if setting != "nature" else ""
-        return Scene(phrase, setting, lighting, float(place_p[best]), season, style)
+        high = sum(float(p) for p, (_, up) in zip(viewpoint_p, VIEWPOINTS) if up)
+        elevated = not enclosed and high > 0.5
+        return Scene(phrase, setting, lighting, float(place_p[best]), season, style, elevated)
 
 
 _cache: dict[str, SceneClassifier] = {}
