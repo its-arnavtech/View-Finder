@@ -145,9 +145,12 @@ has, a complete 360° world of its own:
    magnified more than ~3x are wiped down to their colours and repainted
    nearly so (0.9), and everything else within 50 m is repainted
    image-to-image (0.7, plus 0.05 for every repaint already behind the
-   source bubble). With the optional depth guidance (an SDXL depth
-   ControlNet) every view also follows the world's geometry as rendered from
-   the station, and near surfaces are repainted harder (0.8 to 0.9). The
+   source bubble). In natural scenes, with the optional depth guidance (an
+   SDXL depth ControlNet), every view also follows the world's geometry as
+   rendered from the station, and near surfaces are repainted harder (0.8
+   to 0.9). Built places are not guided: the geometry seen from a new spot
+   is a smooth bowl where walls should be flat, and guided walls came out
+   bent. The
    layout survives; the tears, smears and melt do not.
    Far scenery and sky are kept, so they match the start view. Each view
    blends over its neighbours' work across a band, and over a rim of sky
@@ -176,6 +179,7 @@ that spot.
 | The dome's land mask as exported (eroded a pixel) | From a station the ridge at infinity peeks out beside the 3D ridge; its outermost pixels counted as sky, and the repaint turned the sliver into a cable along every ridge. Exploration widens the mask, so the gap is generated |
 | Dissolve by position (0.5 m band) | Stopping between two stations left both worlds screen-doored together; a timed dissolve as you cross replaced it |
 | Depth guidance fed inverse *distance* | Level ground is a circle of equal distance round the station: a bright disc straight down, arcs at the foot of every view. The ControlNet painted them as ripple rings in the water. It is fed depth along each view's axis, as a camera's depth map is |
+| Guided indoors (the Gothic corridor) | Walls and ribs at 6.5 m melted into curves along the bowl-shaped geometry; unguided views were straight corridors. Built places are no longer guided |
 | Guided, with faint arcs already on the ground | A photo's waves run across it; laid on the ground they are circles round the start point, and the depth network gives each wave a bump. Guided at 0.9, both came back as ripple rings and banded rock, and the next spot inherited them. The guidance now draws near-level ground exactly level (within 15%), and smears are wiped to their colours alone, since the geometry now carries the structure |
 
 Measured on the RTX 4060 Laptop, plugged in: a station takes about 3.5

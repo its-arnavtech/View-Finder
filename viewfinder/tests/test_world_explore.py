@@ -337,3 +337,26 @@ def test_guidance_flattens_rippled_ground_but_keeps_obstacles():
     assert np.allclose(geometry[open_ground], level[open_ground], rtol=1e-5)
     assert np.all(geometry[100:110, 60:70] > 1.5 * level[100:110, 60:70])  # the rock stands out
     assert np.all(geometry[~below] == 0.0)  # sky stays far
+
+
+def test_built_places_are_repainted_unguided():
+    """Guidance follows the neighbouring bubble's geometry; in a corridor its
+    errors bent walls and ribs (issue #3). Only natural scenes are guided."""
+    from viewfinder.world.explore import depth_guided
+    from viewfinder.world.scene import Scene
+
+    class Guided(_RecordingBackend):
+        depth_control = True
+        depths = []
+
+        def inpaint(self, image, mask, prompt, negative, seed, strength=0.99, strength_map=None, control_depth=None):
+            self.depths.append(control_depth)
+            return super().inpaint(image, mask, prompt, negative, seed, strength, strength_map)
+
+    corridor = Scene("a corridor", "indoor", "lit by indoor lights", 0.9, style="with gothic stone arches and vaulted ceilings")
+    street = Scene("a city street lined with buildings", "urban", "on a sunny day", 0.9)
+    assert depth_guided(Guided(), GENERIC)
+    assert not depth_guided(Guided(), corridor) and not depth_guided(Guided(), street)
+    backend = Guided()
+    heal_canvas(_canvas(), corridor, backend, 64)
+    assert backend.depths and all(d is None for d in backend.depths)
