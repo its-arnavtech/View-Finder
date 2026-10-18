@@ -45,6 +45,17 @@ SDXL_FILES = (
     "vae/config.json",
 )
 VAE_FILES = ("config.json", "diffusion_pytorch_model.safetensors")
+#: Depth guidance (ControlNet, CreativeML Open RAIL++-M, 0.55 GB in fp16): a
+#: view is generated to follow a depth map, so a walking spot can be painted
+#: afresh along the world's own geometry instead of copying a distorted
+#: render of it. Optional: without it the generator works unguided.
+SDXL_DEPTH_CONTROL = "diffusers/controlnet-depth-sdxl-1.0-mid"
+CONTROL_FILES = ("config.json", "diffusion_pytorch_model.fp16.safetensors")
+#: How firmly a view follows its depth map, and for what share of the
+#: denoising steps: the layout, not every bump of a depth map rendered from
+#: another viewpoint.
+CONTROL_SCALE = 0.6
+CONTROL_END = 0.8
 
 
 class GeneratorUnavailable(RuntimeError):
@@ -63,11 +74,14 @@ class ViewBackend(Protocol):
         seed: int,
         strength: float = 0.99,
         strength_map: np.ndarray | None = None,
+        control_depth: np.ndarray | None = None,
     ) -> np.ndarray:
         """Fill ``mask`` (True = generate) in the square RGB ``image``. A low
         ``strength`` keeps the image's structure and only adds detail;
         ``strength_map`` (0..1 per pixel) sets it pixel by pixel instead. A
-        backend that cannot vary it may use the map's maximum."""
+        backend that cannot vary it may use the map's maximum.
+        ``control_depth`` (uint8, near = bright) is the view's geometry to
+        follow, used if the backend has ``depth_control``."""
         ...
 
     def describe(self) -> dict[str, str]: ...
@@ -129,6 +143,20 @@ class SDXLBackend:
             self._pipe.scheduler.config, use_karras_sigmas=True, algorithm_type="dpmsolver++"
         )
         self._pipe.set_progress_bar_config(disable=True)
+        # Depth guidance shares every module but its own ControlNet.
+        self._control_pipe = None
+        self.depth_control = False
+        if control_cached():
+            from diffusers import ControlNetModel, StableDiffusionXLControlNetInpaintPipeline
+
+            controlnet = ControlNetModel.from_pretrained(
+                SDXL_DEPTH_CONTROL, torch_dtype=torch.float16, variant="fp16", local_files_only=True
+            ).to(device)
+            self._control_pipe = StableDiffusionXLControlNetInpaintPipeline(
+                **{**self._pipe.components, "controlnet": controlnet}
+            )
+            self._control_pipe.set_progress_bar_config(disable=True)
+            self.depth_control = True
         self._embeddings: dict[tuple[str, str], tuple] = {}
         self.device = device
         self.steps = steps
@@ -165,10 +193,20 @@ class SDXLBackend:
         seed: int,
         strength: float = 0.99,
         strength_map: np.ndarray | None = None,
+        control_depth: np.ndarray | None = None,
     ) -> np.ndarray:
         from PIL import Image
 
         size = image.shape[0]
+        pipe, control = self._pipe, {}
+        if control_depth is not None and self._control_pipe is not None:
+            depth = control_depth if control_depth.ndim == 3 else np.repeat(control_depth[..., None], 3, axis=2)
+            pipe = self._control_pipe
+            control = {
+                "control_image": Image.fromarray(np.ascontiguousarray(depth.astype(np.uint8))),
+                "controlnet_conditioning_scale": CONTROL_SCALE,
+                "control_guidance_end": CONTROL_END,
+            }
         torch = self._torch
         with self._lock:
             embeds, negative_embeds, pooled, negative_pooled = self._embed(prompt, negative)
@@ -182,7 +220,7 @@ class SDXLBackend:
             # trying once more gets through.
             for attempt in (1, 2):
                 try:
-                    result = self._pipe(
+                    result = pipe(
                         prompt_embeds=embeds,
                         negative_prompt_embeds=negative_embeds,
                         pooled_prompt_embeds=pooled,
@@ -197,6 +235,7 @@ class SDXLBackend:
                         generator=torch.Generator("cpu").manual_seed(seed),
                         callback_on_step_end=callback,
                         callback_on_step_end_tensor_inputs=["latents"] if callback else None,
+                        **control,
                     ).images[0]
                     break
                 except (torch.OutOfMemoryError, RuntimeError) as exc:
@@ -270,6 +309,15 @@ def models_cached() -> bool:
     return all(isinstance(try_to_load_from_cache(repo, name), str) for repo, name in needed)
 
 
+def control_cached() -> bool:
+    """The optional depth guidance (SDXL_DEPTH_CONTROL) is downloaded."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:  # pragma: no cover
+        return False
+    return all(isinstance(try_to_load_from_cache(SDXL_DEPTH_CONTROL, name), str) for name in CONTROL_FILES)
+
+
 def download_models() -> list[str]:
     from huggingface_hub import snapshot_download
 
@@ -279,6 +327,12 @@ def download_models() -> list[str]:
         snapshot_download(SDXL_INPAINT, allow_patterns=list(SDXL_FILES), max_workers=1),
         snapshot_download(SDXL_VAE, allow_patterns=list(VAE_FILES), max_workers=1),
     ]
+
+
+def download_control() -> str:
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(SDXL_DEPTH_CONTROL, allow_patterns=list(CONTROL_FILES), max_workers=1)
 
 
 _cache: dict[str, SDXLBackend] = {}

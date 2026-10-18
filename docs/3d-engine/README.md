@@ -9,7 +9,11 @@ lake shore. Without a GPU it falls back to a single-viewpoint 3D photo.
 How a world is made:
 
 1. Depth for the photo (Depth Anything V2), and what kind of place it is
-   (CLIP: setting, lighting, season), which sets the prompts.
+   (CLIP: setting, lighting, season). Outdoors, **GeoCLIP first places the
+   photo on the globe**; where it is sure, the prompts name the region and
+   the kind of country there ("boreal forest and lakes with granite
+   outcrops, in Ontario, Canada"), so what is generated behind you belongs
+   to the place the photo was taken, not to a cliché of it.
 2. The 360° panorama around the photo, generated view by view by Stable
    Diffusion XL inpainting, the photo kept pixel-exact inside it.
 3. Depth for the whole panorama; a ground prior (nothing below the horizon is
@@ -25,7 +29,10 @@ How a world is made:
 6. A standard `.glb` with a dependency-free WebGL viewer.
 
 Like the rest of View Finder it runs locally. Photos never leave your
-computer, and the models are downloaded once, explicitly.
+computer, and the models are downloaded once, explicitly. The engine's guess
+at where a photo was taken (region and confidence, coordinates to ~10 km) is
+recorded in the world's manifest, which travels inside the `.glb`; set
+`VIEWFINDER_WORLD_LOCATE=0` to build without it.
 
 - Design: [ARCHITECTURE.md](ARCHITECTURE.md), the generated world in
   [GENERATIVE.md](GENERATIVE.md) and the walkable world in
@@ -36,8 +43,9 @@ computer, and the models are downloaded once, explicitly.
 ## Setup
 
 One time, with network access, install the extras and download the models:
-Depth Anything V2 Small (~100 MB), LaMa (~93 MB), CLIP ViT-L/14 (~1.7 GB) and
-SDXL inpainting (~7 GB):
+Depth Anything V2 Small (~100 MB), LaMa (~93 MB), CLIP ViT-L/14 (~1.7 GB),
+SDXL inpainting (~7 GB) and an SDXL depth ControlNet (~0.55 GB), which keeps
+the places you walk to on the world's own geometry:
 
 ```bash
 python -m pip install -r viewfinder/requirements-world.txt
@@ -52,12 +60,18 @@ are what make a *generated* world; without them, or without an NVIDIA GPU,
 the engine builds the single-viewpoint 3D photo instead, and the server says
 which it is doing when it starts.
 
-**Time:** a generated desktop world takes about 20 minutes on an RTX 4060
-Laptop (8 GB) plugged in: ~5 for the 360° panorama, then ~3.5 for each of
-the four standing points you can walk to. A mobile world builds one standing
+**Time:** a generated desktop world takes about 25 minutes on an RTX 4060
+Laptop (8 GB) plugged in: ~5 for the 360° panorama, then ~5 for each of
+the four standing points you can walk to (~3.5 without the depth guidance). A mobile world builds one standing
 point. On battery it is several times slower. Re-uploading the same photo reuses its panorama.
 Close memory-heavy apps: on Windows, a GPU that runs out of memory slows to a
 crawl instead of failing.
+
+**Laptops with two GPUs:** everything runs on the NVIDIA card, including the
+offscreen renderer that looks at the world while it is built (it fits
+alongside the generator, ~7.1 of 8 GB). `VIEWFINDER_RENDER_GPU=integrated`
+moves the renderer to the integrated GPU instead; that GPU also draws the
+desktop, which then stutters while a world builds.
 
 ## On your phone
 

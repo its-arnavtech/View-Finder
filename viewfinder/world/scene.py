@@ -8,17 +8,31 @@ Nothing here is tuned to a particular photo.
 
 Generated surroundings are always *empty*: a room is continued as an empty
 room and a square as an empty square, never with invented people.
+
+Outdoors, GeoCLIP places the photo first (locate.py): where it is sure, the
+prompts name the region and the kind of country there, and of the places
+the photo plausibly shows, the likeliest there is chosen.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import locate as locate_module
+from .locate import TERRAINS
+
 logger = logging.getLogger(__name__)
+
+# The kind of country around goes into the prompt only when CLIP is
+# reasonably sure of it: with a trusted location, or from the photo alone
+# when it is clear (from the photo alone, a rainforest gorge also scored
+# "with palms").
+TERRAIN_CONFIDENCE = 0.25
+TERRAIN_CONFIDENCE_UNLOCATED = 0.5
 
 CLIP_MODEL = "openai/clip-vit-large-patch14"
 
@@ -168,6 +182,9 @@ class Scene:
     season: str = ""  # outdoors only, e.g. "in autumn with autumn foliage"
     style: str = ""  # built places only, e.g. "with gothic stone arches and vaulted ceilings"
     elevated: bool = False  # outdoors, seen from well above the ground below the horizon
+    terrain: str = ""  # nature only: the kind of country around (locate.TERRAINS)
+    region: str = ""  # outdoors, where GeoCLIP is sure: e.g. "Ontario, Canada"
+    location: dict | None = field(default=None, compare=False, hash=False)  # GeoCLIP's guess, for the record
 
     @property
     def enclosed(self) -> bool:
@@ -175,7 +192,13 @@ class Scene:
 
     @property
     def subject(self) -> str:
-        return f"{self.place} {self.style}".strip()
+        """The place, what it is made of, the country around and where."""
+        text = f"{self.place} {self.style}".strip()
+        if self.terrain:
+            text += f", {self.terrain}"
+        if self.region:
+            text += f", in {self.region}"
+        return text
 
     @property
     def conditions(self) -> str:
@@ -221,6 +244,9 @@ class Scene:
             "season": self.season,
             "style": self.style,
             "elevated": self.elevated,
+            "terrain": self.terrain,
+            "region": self.region,
+            "location": self.location,
             "confidence": round(self.confidence, 3),
             "prompt": self.prompt(),
         }
@@ -244,6 +270,16 @@ class SceneClassifier:
         self._seasons = self._encode_text([f"a landscape photo taken {phrase}" for phrase in SEASONS])
         self._styles = self._encode_text([f"a photo of a place {phrase}" for phrase in STYLES])
         self._viewpoints = self._encode_text([phrase for phrase, _ in VIEWPOINTS])
+        self._terrains = self._encode_text([f"a photo of {phrase}" for phrase in TERRAINS])
+        self._locator = None
+        if locate_module.enabled():
+            try:
+                self._locator = locate_module.Locator(self._model, self._processor, self.device)
+                self._places_geo = self._locator.text_features([f"a photo of {phrase}" for phrase, _ in PLACES])
+                self._terrains_geo = self._locator.text_features([f"a photo of {phrase}" for phrase in TERRAINS])
+            except Exception as exc:  # GeoCLIP missing or broken: classify by the photo alone
+                logger.warning("Location unavailable (%s); prompts use the photo alone", exc)
+                self._locator = None
         self._lock = threading.Lock()
 
     def _encode_text(self, texts: list[str]):
@@ -258,13 +294,28 @@ class SceneClassifier:
         with self._lock, torch.no_grad():
             inputs = self._processor(images=rgb, return_tensors="pt").to(self.device)
             inputs["pixel_values"] = inputs["pixel_values"].to(self._model.dtype)
-            image = torch.nn.functional.normalize(self._model.get_image_features(**inputs).float(), dim=-1)
+            features = self._model.get_image_features(**inputs)
+            image = torch.nn.functional.normalize(features.float(), dim=-1)
+            terrain_logits = (100.0 * image @ self._terrains.T)[0].cpu().numpy()
             place_p = (100.0 * image @ self._places.T).softmax(dim=-1)[0].cpu().numpy()
             light_p = (100.0 * image @ self._lighting.T).softmax(dim=-1)[0].cpu().numpy()
             season_p = (100.0 * image @ self._seasons.T).softmax(dim=-1)[0].cpu().numpy()
             style_p = (100.0 * image @ self._styles.T).softmax(dim=-1)[0].cpu().numpy()
             viewpoint_p = (100.0 * image @ self._viewpoints.T).softmax(dim=-1)[0].cpu().numpy()
         best = int(np.argmax(place_p))
+        location = feature = None
+        if self._locator is not None and PLACES[best][1] in ("nature", "urban"):
+            with self._lock:
+                location, feature = self._locator.locate(features)
+        if location is not None and location.trusted:
+            # Of the places the photo plausibly shows, the likeliest here
+            # (never another kind of setting).
+            similarity = self._locator.similarity(feature, self._places_geo)
+            allowed = np.array([s == PLACES[best][1] for _, s in PLACES])
+            best = locate_module.rerank(place_p, similarity, location.confidence, allowed)
+            terrain_logits = terrain_logits + locate_module.LOCATION_WEIGHT * location.confidence * (
+                self._locator.similarity(feature, self._terrains_geo)
+            )
         phrase, setting = PLACES[best]
         lighting = LIGHTING[int(np.argmax(light_p))]
         enclosed = setting in ("indoor", "vehicle")
@@ -278,7 +329,19 @@ class SceneClassifier:
         style = STYLES[int(np.argmax(style_p))] if setting != "nature" else ""
         high = sum(float(p) for p, (_, up) in zip(viewpoint_p, VIEWPOINTS) if up)
         elevated = not enclosed and high > 0.5
-        return Scene(phrase, setting, lighting, float(place_p[best]), season, style, elevated)
+        terrain = ""
+        if setting == "nature":
+            terrain_p = np.exp(terrain_logits - terrain_logits.max())
+            terrain_p /= terrain_p.sum()
+            located = location is not None and location.trusted
+            if terrain_p.max() >= (TERRAIN_CONFIDENCE if located else TERRAIN_CONFIDENCE_UNLOCATED):
+                terrain = TERRAINS[int(np.argmax(terrain_p))]
+        trusted = location is not None and location.trusted and not enclosed
+        return Scene(
+            phrase, setting, lighting, float(place_p[best]), season, style, elevated,
+            terrain=terrain, region=location.region if trusted else "",
+            location=location.as_dict() if location is not None else None,
+        )
 
 
 _cache: dict[str, SceneClassifier] = {}

@@ -12,3 +12,6 @@ huggingface_hub==0.36.2
 # Offscreen OpenGL: renders the world-in-progress from new standing points to
 # find what walking into it reveals (explore.py), and the walkthrough sheets.
 moderngl==5.13.0
+# Country names for the region GeoCLIP places a photo in ("Ontario, Canada"
+# rather than "Ontario"); without it the prompt names the region alone.
+Babel==2.18.0

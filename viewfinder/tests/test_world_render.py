@@ -113,3 +113,30 @@ def test_a_sheet_stretched_diagonally_reads_as_smeared():
     frame = r.render(camera)
     assert 0.0 < frame.density[64, 64] < 0.35
     r.release()
+
+
+@pytest.mark.parametrize(
+    "choice, expected",
+    [(None, "0x800000001"), ("discrete", "0x800000001"), ("integrated", "0x800000000"), ("system", None)],
+)
+def test_render_gpu_choice(monkeypatch, choice, expected):
+    from viewfinder.world import render
+
+    monkeypatch.setattr(render.sys, "platform", "win32")
+    monkeypatch.delenv("SHIM_MCCOMPAT", raising=False)
+    if choice is None:
+        monkeypatch.delenv(render.RENDER_GPU_ENV, raising=False)
+    else:
+        monkeypatch.setenv(render.RENDER_GPU_ENV, choice)
+    render._prefer_gpu()
+    assert render.os.environ.get("SHIM_MCCOMPAT") == expected
+
+
+def test_render_gpu_leaves_a_users_own_setting(monkeypatch):
+    from viewfinder.world import render
+
+    monkeypatch.setattr(render.sys, "platform", "win32")
+    monkeypatch.setenv("SHIM_MCCOMPAT", "0x800000000")
+    monkeypatch.setenv(render.RENDER_GPU_ENV, "discrete")
+    render._prefer_gpu()
+    assert render.os.environ["SHIM_MCCOMPAT"] == "0x800000000"

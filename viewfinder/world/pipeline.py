@@ -171,6 +171,7 @@ def _explore_summary(exploration, scale: float) -> dict[str, Any]:
         "metres_per_unit": round(scale, 4),
         "views": exploration.views,
         "bubbles": len(exploration.bubbles),
+        "depth_guided": exploration.depth_guided,
         "stations": [
             {"position": [round(float(v), 2) for v in s.position], "views": s.views, "source": s.source,
              "built": s.built, "seconds": round(s.seconds, 1)}
@@ -622,7 +623,15 @@ def build_world(
             "zenith": _rgb01(zenith),
             "horizon": _rgb01(horizon),
             "up": [round(float(v), 4) for v in up],
-            "fog": {"color": _rgb01(horizon), "density": round(fog_density(profile.far * scale), 6)},
+            # Fog only where the photo is foggy: on a clear day it washed the
+            # generated hills behind you out to a white haze, cut off along
+            # the mesh's cells against the unfogged sky. The single-viewpoint
+            # world keeps it, to hide where its mesh meets the dome.
+            "fog": {
+                "color": _rgb01(horizon),
+                "density": round(fog_density(profile.far * scale), 6)
+                if surround is None or surround.scene.lighting == "in fog" else 0.0,
+            },
             "ground": ground.as_dict(),
             "radii": {
                 "sky": profile.far * SKY_RADIUS * scale,

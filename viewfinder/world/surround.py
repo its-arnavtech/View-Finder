@@ -38,7 +38,7 @@ from .scene import GENERIC, Scene
 logger = logging.getLogger(__name__)
 
 #: Bump when generation changes enough that cached panoramas are stale.
-GENERATION_VERSION = "6"
+GENERATION_VERSION = "7"
 
 #: Generation canvas. Views are a quarter of its width: 1024 px (SDXL's
 #: native size) at 100° give ~10 px/degree, which a 4096-wide
@@ -152,7 +152,7 @@ def _cache_key(rgb: np.ndarray, camera: Intrinsics, scene: Scene, backend: dict[
     digest.update(np.ascontiguousarray(rgb).tobytes())
     # Only what changes the generated pixels: the viewpoint changes depth, not
     # prompts, so a panorama stays valid across it.
-    prompts = {k: v for k, v in asdict(scene).items() if k != "elevated"}
+    prompts = {k: v for k, v in asdict(scene).items() if k not in ("elevated", "location")}
     digest.update(json.dumps(
         [GENERATION_VERSION, PANORAMA_SIZE, camera.as_dict(), prompts, backend], sort_keys=True
     ).encode())

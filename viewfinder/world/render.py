@@ -22,18 +22,42 @@ around (the photo's layers and panorama belong to the start point): only the
 nearest station's meshes are drawn (``station_fade``), so wherever you stand
 you see one coherent world made for that spot, never a mosaic of surfaces
 made for different places fighting over depth.
+
+On a laptop with two GPUs (NVIDIA Optimus) the renderer asks for the one
+named in ``VIEWFINDER_RENDER_GPU``: ``discrete`` (the default, the NVIDIA
+card that also runs the generator) or ``integrated`` (leaves the NVIDIA
+card's memory to the generator, but loads the integrated GPU, which the
+desktop also draws on). Anything else leaves the choice to the system.
 """
 
 from __future__ import annotations
 
+import logging
 import math
+import os
+import sys
 import threading
 from dataclasses import dataclass
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 SURFACE, BACKDROP, DOME = 0, 1, 2
 HOLE, SKY, SOLID = 0, 1, 2
+
+RENDER_GPU_ENV = "VIEWFINDER_RENDER_GPU"
+# NVIDIA Optimus reads this per process when OpenGL loads.
+_OPTIMUS = {"discrete": "0x800000001", "integrated": "0x800000000"}
+
+
+def _prefer_gpu() -> None:
+    """Point this process's OpenGL at the GPU ``VIEWFINDER_RENDER_GPU`` names
+    (default discrete). Only before the first context: the driver keeps the
+    GPU it loaded on. A ``SHIM_MCCOMPAT`` set by the user wins."""
+    choice = os.environ.get(RENDER_GPU_ENV, "discrete").strip().lower()
+    if sys.platform == "win32" and choice in _OPTIMUS:
+        os.environ.setdefault("SHIM_MCCOMPAT", _OPTIMUS[choice])
 
 _VERTEX = """
 #version 330
@@ -209,10 +233,13 @@ class WorldRenderer:
             import moderngl
         except ImportError as exc:
             raise RendererUnavailable("moderngl is not installed") from exc
+        _prefer_gpu()
         try:
             self._ctx = moderngl.create_standalone_context(require=330)
         except Exception as exc:  # no GL driver / headless
             raise RendererUnavailable(f"no OpenGL 3.3 context: {exc}") from exc
+        self.gpu = str(self._ctx.info.get("GL_RENDERER", "unknown"))
+        logger.info("rendering on %s", self.gpu)
         self._gl = moderngl
         self._program = self._ctx.program(vertex_shader=_VERTEX, fragment_shader=_FRAGMENT)
         self._meshes: list[dict] = []

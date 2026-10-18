@@ -96,8 +96,9 @@ photo ── depth ── scene/prompts ── 360° panorama at the origin (v2)
 
 ## Built so far (and what changed on the way)
 
-- `render.py`: offscreen OpenGL renderer (moderngl, the integrated GPU, so
-  the NVIDIA card stays free for SDXL): colour, metric depth, coverage
+- `render.py`: offscreen OpenGL renderer (moderngl, on the NVIDIA card with
+  SDXL; on the integrated GPU it fought the desktop for a GPU that was
+  already busy drawing it): colour, metric depth, coverage
   (surface / sky / hole) and texel density per pixel. Every mesh but the
   dome and sky belongs to a *station*; only the nearest station's are drawn.
 - `explore.py`: a **360° bubble per station** (round 2, below). Stations go
@@ -144,7 +145,10 @@ has, a complete 360° world of its own:
    magnified more than ~3x are wiped down to their colours and repainted
    nearly so (0.9), and everything else within 50 m is repainted
    image-to-image (0.7, plus 0.05 for every repaint already behind the
-   source bubble). The layout survives; the tears, smears and melt do not.
+   source bubble). With the optional depth guidance (an SDXL depth
+   ControlNet) every view also follows the world's geometry as rendered from
+   the station, and near surfaces are repainted harder (0.8 to 0.9). The
+   layout survives; the tears, smears and melt do not.
    Far scenery and sky are kept, so they match the start view. Each view
    blends over its neighbours' work across a band, and over a rim of sky
    beyond near silhouettes, so neither views nor skylines show a seam;
@@ -171,11 +175,15 @@ that spot.
 | The start point's dome behind every bubble | Bright blobs of the wrong scenery in each cut at a depth edge; each station now has its own dome |
 | The dome's land mask as exported (eroded a pixel) | From a station the ridge at infinity peeks out beside the 3D ridge; its outermost pixels counted as sky, and the repaint turned the sliver into a cable along every ridge. Exploration widens the mask, so the gap is generated |
 | Dissolve by position (0.5 m band) | Stopping between two stations left both worlds screen-doored together; a timed dissolve as you cross replaced it |
+| Depth guidance fed inverse *distance* | Level ground is a circle of equal distance round the station: a bright disc straight down, arcs at the foot of every view. The ControlNet painted them as ripple rings in the water. It is fed depth along each view's axis, as a camera's depth map is |
+| Guided, with faint arcs already on the ground | A photo's waves run across it; laid on the ground they are circles round the start point, and the depth network gives each wave a bump. Guided at 0.9, both came back as ripple rings and banded rock, and the next spot inherited them. The guidance now draws near-level ground exactly level (within 15%), and smears are wiped to their colours alone, since the geometry now carries the structure |
 
-Measured on the RTX 4060 Laptop: a station takes about 3.5 minutes (8–10
-views); generation peaks at 6.3 GB of VRAM with the VAE decoding in tiles
-(7.8 GB without, which spilled into system memory and ran five times
-slower).
+Measured on the RTX 4060 Laptop, plugged in: a station takes about 3.5
+minutes (8–10 views), about 5 with depth guidance; generation peaks at
+6.3 GB of VRAM with the VAE decoding in tiles (7.8 GB without, which spilled
+into system memory and ran five times slower), 7.1 GB with the ControlNet
+and the renderer on the same card. On battery the card is held to about
+28 W instead of 60 and everything takes twice as long.
 
 ## Risks
 

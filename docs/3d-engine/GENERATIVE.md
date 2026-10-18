@@ -44,6 +44,7 @@ photo ─┬─ depth (Depth Anything V2) ────────────�
 | Module | Role |
 |---|---|
 | `scene.py` | CLIP ViT-L/14 picks place, setting (nature / urban / indoor / vehicle) and lighting from fixed vocabularies. Builds per-direction prompts ("the ceiling of …" when looking up indoors). The negative prompt always excludes people, text and frames. |
+| `locate.py` | GeoCLIP on the scene classifier's own CLIP (its frozen image tower; only GeoCLIP's projection, location encoder and GPS gallery are added, ~40 MB). Trust is the share of GeoCLIP's probability within 500 km of its best guess (0.6 or more). Where trusted: the region's name (offline reverse geocoding), the kind of country there (`TERRAINS`, scored against the location in GeoCLIP's space and against the photo by CLIP), and, of the places the photo plausibly shows, the likeliest there. Never indoors. |
 | `panorama.py` | Equirectangular geometry: photo → canvas, perspective views in and out, depth stitching. |
 | `generate.py` | `ViewBackend` protocol (`inpaint(image, mask, prompt, negative, seed)`) and the local SDXL backend; the view plan and loop. |
 | `surround.py` | Builds the `Surround` (panorama, depth, scene) and its mesh layer. |

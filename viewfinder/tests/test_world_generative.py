@@ -179,8 +179,11 @@ def test_world_with_a_generated_surround(small_canvas, monkeypatch):
     ring = surround.ring_pixels(camera)
     assert u.min() >= ring - 2 and u.max() <= camera.width - 1 - ring + 2
     assert v.min() >= ring - 2 and v.max() <= camera.height - 1 - ring + 2
+    # A clear day: no fog over the generated world (it washed far hills white).
+    assert manifest["environment"]["fog"]["density"] == 0.0
     plain = build_world(scene_jpeg(), profile="mobile", estimator=SceneEstimator())
     assert plain.manifest["surround"] == {"generator": "none"}
+    assert plain.manifest["environment"]["fog"]["density"] > 0  # hides the single-view mesh's edge
 
 
 def test_surround_mesh_leaves_the_photo_to_the_photo_layer(small_canvas):
@@ -262,3 +265,8 @@ def test_the_viewpoint_does_not_invalidate_a_generated_panorama():
     high = replace(ground, elevated=True)
     assert surround._cache_key(rgb, camera, ground, {}) == surround._cache_key(rgb, camera, high, {})
     assert high.as_dict()["elevated"] is True
+    # GeoCLIP's raw guess is a record; only what reaches the prompt counts.
+    located = replace(ground, location={"lat": 45.4, "lon": -80.3, "confidence": 0.98})
+    assert surround._cache_key(rgb, camera, ground, {}) == surround._cache_key(rgb, camera, located, {})
+    named = replace(ground, region="Ontario, Canada")
+    assert surround._cache_key(rgb, camera, ground, {}) != surround._cache_key(rgb, camera, named, {})

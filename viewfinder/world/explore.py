@@ -40,7 +40,7 @@ import numpy as np
 
 from .generate import ViewBackend, match_colours, view_plan
 from .layers import propagate_background
-from .panorama import equirect_directions, render_view, sample_equirect
+from .panorama import View, equirect_directions, render_view, sample_equirect
 from .render import HOLE, SKY, SOLID, Camera, WorldRenderer
 from .scene import Scene
 
@@ -73,6 +73,14 @@ HOLE_STRENGTH = 0.98
 WIPED_STRENGTH = 0.9
 HOP_STRENGTH = 0.05
 MAX_HEAL_STRENGTH = 0.8
+# With depth guidance (generate.SDXL_DEPTH_CONTROL) a view is painted along
+# the world's own geometry, rendered from the station, so its structure no
+# longer has to come from the distorted picture: near surfaces are repainted
+# harder. Unguided, a spot two repaints from the photo (6.5 m in) kept the
+# distortions of the render it started from (a leaning trunk became a pale
+# slab).
+GUIDED_HEAL_STRENGTH = 0.8
+GUIDED_MAX_HEAL_STRENGTH = 0.9
 # Surfaces magnified past this many screen pixels per texel (the ground
 # around a station, seen from the start a few metres off, is magnified 5-10x)
 # are long radial streaks, which survive even 0.8 as motion blur. They are
@@ -80,6 +88,17 @@ MAX_HEAL_STRENGTH = 0.8
 # grass there; an 8-pixel blur left 100-pixel streaks pointing the same way)
 # plus noise, so the model paints fresh texture over the right colours.
 SMEAR_DENSITY = 0.35
+# Smears are wiped down to their colour layout (a blur of the view size over
+# this) before the repaint. With depth guidance the structure comes from the
+# geometry, so they are wiped down to their colours alone: guided, the faint
+# arcs a photo's waves leave on the ground round the start point came back
+# as ripple rings and banded rock.
+WIPE_SCALE = 24
+GUIDED_WIPE_SCALE = 8
+# The guidance map's ground: surfaces within this fraction of a level ground
+# 1.6 m down are drawn as that ground. Depth estimates ripple with the waves
+# and seams of the bubble they came from; guided, every ripple was painted.
+GROUND_SNAP = 0.15
 # A view is generated only if this much of it needs it.
 MIN_FILL_FRACTION = 0.003
 MIN_HEAL_FRACTION = 0.03
@@ -125,6 +144,7 @@ class Exploration:
     stations: list[Station] = field(default_factory=list)
     views: int = 0
     seconds: float = 0.0
+    depth_guided: bool = False  # views followed the world's geometry (depth ControlNet)
 
 
 # -- the ground -----------------------------------------------------------
@@ -262,6 +282,52 @@ def render_canvas(
     return Canvas(rgb, distance, coverage, density)
 
 
+def control_disparity(canvas: Canvas) -> np.ndarray:
+    """The station's geometry as inverse distance (1/m), equirectangular:
+    what the canvas rendered, with the holes filled in from around them (a
+    hole is something hidden, at about the depth of what surrounds it) and
+    the sky at zero."""
+    solid = canvas.coverage == SOLID
+    inverse = np.where(solid, 1.0 / np.maximum(canvas.distance, 0.3), 0.0).astype(np.float32)
+    if GROUND_SNAP > 0:
+        level = floor_disparity_equirect(*inverse.shape, EYE_HEIGHT, slack=1.0)
+        ground = solid & (level > 0) & (np.abs(inverse - level) <= GROUND_SNAP * level)
+        inverse = np.where(ground, level, inverse).astype(np.float32)
+    hole = canvas.coverage == HOLE
+    if hole.any() and solid.any():
+        # Push-pull on an 8-bit encoding (propagate_background), in the
+        # square root so near and far both keep their resolution.
+        top = float(np.sqrt(inverse.max())) or 1.0
+        encoded = np.clip(np.sqrt(inverse) / top * 255.0, 0, 255).astype(np.uint8)
+        # Only solid surfaces lend their depth: the sky beside a hole is not
+        # what it hides.
+        filled = propagate_background(np.repeat(encoded[..., None], 3, axis=2), hole, solid)[..., 0]
+        inverse = np.where(hole, (filled.astype(np.float32) / 255.0 * top) ** 2, inverse).astype(np.float32)
+    return inverse
+
+
+def view_inverse_depth(geometry: np.ndarray, view: View) -> np.ndarray:
+    """The equirectangular inverse *distance* ``geometry`` as inverse depth
+    along ``view``'s axis, what a camera's depth map holds. Distance draws
+    level ground as circles round the station (a bright disc straight down,
+    arcs at the foot of every view), and a depth ControlNet painted them as
+    ripples; along the axis it is bands parallel to the horizon, and even
+    straight down."""
+    cosine = np.maximum(view.directions() @ view.basis()[0], 1e-3)
+    return (render_view(geometry, view) / cosine).astype(np.float32)
+
+
+def depth_image(inverse: np.ndarray) -> np.ndarray:
+    """A view's inverse depth as a depth ControlNet expects it: near bright,
+    far and sky dark, scaled to the view (8-bit RGB). Lightly smoothed: the
+    layout matters, not the creases of a mesh seen from elsewhere."""
+    top = float(np.percentile(inverse, 99)) if inverse.any() else 0.0
+    scaled = np.clip(inverse / top, 0.0, 1.0) if top > 0 else np.zeros_like(inverse)
+    scaled = cv2.GaussianBlur(scaled.astype(np.float32), (0, 0), max(1.0, inverse.shape[0] / 256))
+    grey = (scaled * 255.0).astype(np.uint8)
+    return np.repeat(grey[..., None], 3, axis=2)
+
+
 def heal_canvas(
     canvas: Canvas,
     scene: Scene,
@@ -274,7 +340,8 @@ def heal_canvas(
     """Fill the canvas's holes and repaint its near surfaces, view by view
     round the panorama (modifies ``canvas.rgb`` in place). ``hops`` is how
     many repaints are already behind the canvas (0: rendered from the photo
-    and its panorama).
+    and its panorama). With a depth-guided backend, every view follows the
+    canvas's own geometry and near surfaces are repainted harder.
 
     One pass per view with a strength per pixel: holes are seeded with a
     soft continuation plus noise (generate.complete_panorama) and generated
@@ -302,7 +369,12 @@ def heal_canvas(
     plan = view_plan(view_size)
     generated_views = 0
     band = max(4, view_size // 20)
-    near_strength = min(HEAL_STRENGTH + HOP_STRENGTH * hops, MAX_HEAL_STRENGTH)
+    guided = bool(getattr(backend, "depth_control", False))
+    if guided:
+        near_strength = min(GUIDED_HEAL_STRENGTH + HOP_STRENGTH * hops, GUIDED_MAX_HEAL_STRENGTH)
+        geometry = control_disparity(canvas)
+    else:
+        near_strength = min(HEAL_STRENGTH + HOP_STRENGTH * hops, MAX_HEAL_STRENGTH)
     for index, view in enumerate(plan):
         known_view = render_view(known.astype(np.float32), view) > 0.999
         known_view = cv2.erode(known_view.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
@@ -330,7 +402,8 @@ def heal_canvas(
             strength[todo] = (near_strength + (WIPED_STRENGTH - near_strength) * stretched)[todo]
             smeared = todo & (density < SMEAR_DENSITY)
             if smeared.any():
-                wiped = cv2.GaussianBlur(image, (0, 0), view_size / 24).astype(np.float32)
+                scale = GUIDED_WIPE_SCALE if guided else WIPE_SCALE
+                wiped = cv2.GaussianBlur(image, (0, 0), view_size / scale).astype(np.float32)
                 wiped += rng.normal(0.0, 16.0, image.shape).astype(np.float32)
                 image = np.where(smeared[..., None], np.clip(wiped, 0, 255), image).astype(np.uint8)
         if hole.any():
@@ -343,9 +416,11 @@ def heal_canvas(
         grown = distance <= band
         # The band around it is touched up like near surfaces, to blend in.
         strength[grown & (strength == 0)] = near_strength
+        # Only a backend that declares depth_control is handed a depth map.
+        guide = {"control_depth": depth_image(view_inverse_depth(geometry, view))} if guided else {}
         generated = backend.inpaint(
             image, grown, scene.prompt(direction), scene.negative(direction), seed + index,
-            strength=float(strength[grown].max()), strength_map=strength,
+            strength=float(strength[grown].max()), strength_map=strength, **guide,
         )
         generated = match_colours(generated, image, grown & known_view)
         ramp = np.clip(1.0 - distance / band, 0.0, 1.0)
@@ -573,7 +648,7 @@ def explore(
     from .surround import DEPTH_SIZE
 
     started = time.perf_counter()
-    result = Exploration(stations=stations)
+    result = Exploration(stations=stations, depth_guided=bool(getattr(backend, "depth_control", False)))
     built: list[np.ndarray] = [np.zeros(3)]
     hops: list[int] = [0]  # repaints between each bubble and the photo
     view_size = panorama_size[0] // 4

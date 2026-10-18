@@ -77,10 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     setup = commands.add_parser(
         "setup",
-        help="download the models once: depth (~100 MB), LaMa (~93 MB), scene CLIP (~1.7 GB) and "
-        "the SDXL surround generator (~7 GB)",
+        help="download the models once: depth (~100 MB), LaMa (~93 MB), scene CLIP (~1.7 GB), "
+        "the SDXL surround generator (~7 GB) and its depth guidance (~0.55 GB)",
     )
-    setup.add_argument("--no-generator", action="store_true", help="skip the ~9 GB generator and CLIP models")
+    setup.add_argument("--no-generator", action="store_true", help="skip the ~9.3 GB generator, depth guidance and CLIP models")
     setup.add_argument("--depth-model-id", default=DEPTH_ANYTHING_SMALL)
     setup.add_argument("-v", "--verbose", action="store_true")
     return parser
@@ -291,6 +291,7 @@ def _setup(args: argparse.Namespace) -> int:
         for label, ready, fetch in (
             ("Scene model (CLIP ViT-L/14, ~1.7 GB)", scene.clip_cached, scene.download_model),
             ("Surround generator (SDXL inpainting, ~7 GB)", generate.models_cached, generate.download_models),
+            ("Depth guidance (SDXL depth ControlNet, ~0.55 GB)", generate.control_cached, generate.download_control),
         ):
             if ready():
                 print(f"{label} is already installed.")

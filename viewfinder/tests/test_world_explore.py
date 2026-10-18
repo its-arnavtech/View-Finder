@@ -273,3 +273,67 @@ def test_the_more_a_surface_is_stretched_the_less_of_it_is_kept():
     assert values.min() == pytest.approx(HEAL_STRENGTH, abs=1e-3)  # the sharp half
     middle = values[(values > HEAL_STRENGTH + 0.01) & (values < WIPED_STRENGTH - 0.01)]
     assert middle.size  # the stretched half, in between
+
+
+def test_a_depth_guided_backend_paints_along_the_worlds_geometry():
+    from viewfinder.world.explore import GUIDED_HEAL_STRENGTH, control_disparity, depth_image
+
+    class Guided(_RecordingBackend):
+        depth_control = True
+        depths = []
+
+        def inpaint(self, image, mask, prompt, negative, seed, strength=0.99, strength_map=None, control_depth=None):
+            self.depths.append(control_depth)
+            return super().inpaint(image, mask, prompt, negative, seed, strength, strength_map)
+
+    canvas = _canvas()
+    geometry = control_disparity(canvas)
+    assert 1 / 6.0 < geometry[100, 5] <= 1 / 4.0 + 1e-3  # a hole takes the (near) depth around it, not the sky's
+    assert geometry[10, 128] == 0.0  # the sky is far
+    backend = Guided()
+    heal_canvas(canvas, GENERIC, backend, 64)
+    assert backend.depths and all(d is not None and d.dtype == np.uint8 for d in backend.depths)
+    assert max(s for _, s in backend.calls) >= GUIDED_HEAL_STRENGTH  # repainted harder
+    view = np.zeros((128, 128), np.float32)  # sky on top
+    view[64:96] = 0.1  # far ground
+    view[96:] = 1.0  # near ground
+    image = depth_image(view)
+    assert image[120, 64, 0] > image[80, 64, 0] > image[10, 64, 0] == 0  # near bright, sky dark
+
+
+def test_guidance_draws_level_ground_as_a_camera_would():
+    """Level ground in the guidance map: bands parallel to the horizon, and
+    even straight down. Inverse distance drew circles round the station,
+    which came back painted as ripples."""
+    from viewfinder.world.explore import view_inverse_depth
+    from viewfinder.world.generate import View
+
+    ground = floor_disparity_equirect(512, 1024, EYE_HEIGHT, slack=1.0)
+    down = view_inverse_depth(ground, View(0.0, -90.0, 100.0, 128))
+    assert np.allclose(down[8:-8, 8:-8], 1 / EYE_HEIGHT, rtol=0.03)
+    ahead = view_inverse_depth(ground, View(30.0, 0.0, 100.0, 128))
+    rows = ahead[80:120:8, 8:-8]  # below the horizon
+    assert np.allclose(rows, rows[:, :1], rtol=0.03)  # each row level
+    assert np.all(np.diff(rows[:, 0]) > 0)  # nearer lower down
+
+
+def test_guidance_flattens_rippled_ground_but_keeps_obstacles():
+    """Depth estimates ripple with a lake's waves; guided, the ripples came
+    back painted as rings. Near-level ground is drawn level; a rock is not."""
+    from viewfinder.world.explore import Canvas, control_disparity
+
+    height, width = 128, 256
+    level = floor_disparity_equirect(height, width, EYE_HEIGHT, slack=1.0)
+    below = level > 0
+    rows = np.arange(height, dtype=np.float32)[:, None].repeat(width, axis=1)
+    ripple = 1.0 + 0.08 * np.sin(rows * 1.7)  # wave bumps, up to 8%
+    distance = np.where(below, 1.0 / np.maximum(level, 1e-6) * ripple, 0.0).astype(np.float32)
+    distance[100:110, 60:70] *= 0.5  # a rock, twice as near as the ground there
+    coverage = np.where(below, SOLID, SKY).astype(np.uint8)
+    canvas = Canvas(np.zeros((height, width, 3), np.uint8), distance, coverage, np.ones((height, width), np.float32))
+    geometry = control_disparity(canvas)
+    open_ground = below.copy()
+    open_ground[100:110, 60:70] = False
+    assert np.allclose(geometry[open_ground], level[open_ground], rtol=1e-5)
+    assert np.all(geometry[100:110, 60:70] > 1.5 * level[100:110, 60:70])  # the rock stands out
+    assert np.all(geometry[~below] == 0.0)  # sky stays far
