@@ -218,3 +218,100 @@ was judged on:
   outside the frame is a plausible blur, not a reconstruction. Generative
   outpainting/inpainting is the next quality step (architecture §9), and it
   needs a much larger model.
+
+## 8. Quality pass 3: learned inpainting (LaMa)
+
+Eight photos the engine had never been tuned on (a girl in a chicken coop,
+a German street, Los Angeles, a Virginia cave, bronze bulls in Madrid,
+New York, a Taipei stone lion, a Virgin Islands beach) were rendered from
+the eight preview poses. The two weakest things on the sheets were the
+blurred surround when looking left or right, and smeared fills where hidden
+areas open up (the bulls, the lion, the cave). Both are invented content,
+so this pass tried a learned inpainter: LaMa (OpenCV Model Zoo ONNX export,
+Apache-2.0, ~93 MB), run by ONNX Runtime on the CPU (architecture §3.9).
+
+### Findings
+
+| # | Experiment | Result | Decision |
+|---|---|---|---|
+| L1 | LaMa outpainting the **360° surround**, photo projected into a 200° equirectangular window | Every scene collapsed into the same grey-green texture; even the pink granite plaza and the orange cave lost their colours | Not used. |
+| L2 | The surround grown in steps of 1.6×, so that LaMa never invents more than ~60% of its input | Collapsed in the first step: generic mossy noise round the coop | Not used. The surround stays profile-based, which at least keeps each scene's colours. |
+| L3 | LaMa for the **frame pad** (the 12% border the mesh extends past the photo) | Texture and structure carry on past the frame: granite and a bull's tail (Madrid), the lion's tree, paving and wall (Taipei), rock all round (cave). The stretched-and-blurred pad was a smear by comparison. | Used. Only the outer two-thirds of the pad fade to the surround. |
+| L4 | LaMa for the **hidden background**, masking every non-donor pixel | Coherent far-side texture instead of push-pull's smears and bright blobs (cave), grass and wall behind the lion. Where most of an occluder stays visible to the model, it continues the occluder a little ("ghost" bull texture). | Used. Push-pull remains the fallback. |
+| L4b | Growing the mask over each whole occluder (geodesic, through pixels at least as near as the edge's mid-level) | Masked 52–56% of the canvas instead of 45–46%, with no visible change in the band the layer actually draws; the "ghost" fragments are occluder pixels the layer never replaces or shows | Not used. |
+| L5 | Session start took ~100 s | Full graph optimisation of this export, for no faster inference | Basic optimisation level: ~12 s, once per process. |
+| L6 | Passes took 10–58 s instead of ~3 s | ONNX Runtime's default of one thread per physical core put work on the Core Ultra's efficiency cores, and every step waited for them (worse on battery) | At most six intra-op threads: ~3 s per pass on battery. |
+
+### Results
+
+- **Contact sheets (eight fresh photos, eight poses).** Wherever the view
+  reaches the frame's edge, the scene now carries on: the coop fence, the
+  German courtyard wall (before: a bright stretched strip), Los Angeles'
+  paving (before: a beige smear across the lower left), the cave's rock.
+  Stepping sideways behind the girl in the coop shows dirt texture where
+  there were pink smears. No regressions in any pose. Turning far left or
+  right still ends in the soft profile surround (L1, L2).
+- **Stress harness with LaMa (mobile, 18 photos + 19 edge cases).** 35
+  worlds, 2 correct rejections, 0 failures, including the 8:1 panorama,
+  48×36, 16-bit, CMYK and all-black inputs. The cost is time: a median
+  mobile build of 8.5 s (laptop on battery, sharing the CPU with the
+  renderer), up from 0.5–1.5 s. `--inpaint none` restores the old speed.
+- **Tests.** 195 pass; the LaMa paths are covered by a stand-in inpainter,
+  plus one real-model test.
+
+## 9. v2 and v3: a generated world, then a walkable one
+
+The user's verdicts drove both: v1 "made the image a little 3D on the
+front" (no world); v2 "only an image made 3D, no world behind it" (a
+generated 360° panorama, but a bubble you could not walk out of). Design:
+[GENERATIVE.md](GENERATIVE.md) and [EXPLORABLE-PLAN.md](EXPLORABLE-PLAN.md).
+Every finding below was measured on the user's lake photo (515×388) with the
+walkthrough renderer (`benchmark-harness/world_walk.py`), then on a canyon, a
+street and an indoor corridor.
+
+| # | Symptom | Cause | Fix |
+|---|---|---|---|
+| G1 | Generated views black | The hole was blank, and at strength 0.99 the model starts from a trace of its input | Seed holes with a push-pull continuation of the known pixels plus noise |
+| G2 | The photo framed as a picture in a wooden room | Pure noise (strength 1.0) | Same seeding |
+| G3 | Panel seams; haze growing away from the photo | Each view's blended band was discarded; smooth seeds were copied | Blend a ~5° band back with a distance ramp; colour-match each view; noise in the seed; DPM++ 2M Karras |
+| G4 | Upside-down cliff over the zenith, then a rock ceiling | One straight-up view saw treetops all round its edge | Four views tilted 50° up instead; outdoors "up" negatives exclude land |
+| G5 | Comb-like streaks near the nadir | Bilinear sampling mixed unfilled black into the known boundary | Known only where every interpolated neighbour is known, eroded a pixel |
+| G6 | A hard seam at the photo's frame | Generated content met the photo edge | A 2.5° ring inside the frame is repainted and faded; the photo's meshes stop at it |
+| G7 | ~13 GB RAM, generation paging to a crawl | Model CPU offload shuttled the 5 GB UNet every view | UNet and VAE stay on the GPU; text encoders visit it to encode a prompt (3 per world, cached) |
+| W1 | You could not walk anywhere | Navigation clamped to ±0.3 × the near-field depth around one viewpoint | Walking: stations 3, 6.5, 10 m out; the world explored from each |
+| W2 | The lake tore open as you walked | Depth networks read reflections in water (and reflected sky) as far away | Ground prior: nothing below the horizon is farther than the ground (panorama and photo) |
+| W3 | Grey smears 6 m in | A 515-px photo magnified across the screen | Texel density from the GPU render (`fwidth`); badly magnified surfaces within 5 m are repainted |
+| W4 | Patchwork of reflections on the water | The same water repainted from several stations | A surface is regenerated at most once |
+| W5 | Pale sky-coloured patches on the water | Repainted from afar at a grazing angle, where water reflects the sky | Repaint only within 5 m of the standing point |
+| W6 | Bright streaks along every ridge | Sliver fills along skylines took a rock's depth | Fills narrower than 5 px dropped; a stricter sky threshold for new holes |
+| W7 | The start view no longer exactly the photo | Repaints (preferred in depth ties) drew over it from everywhere | Repaints are *refinements*: drawn only within 1.5–3 m of where they were painted, screen-door faded (viewer and GPU renderer share the rule) |
+| W8 | Canyon walls smeared along the slot | The density test took the larger texture axis; a rubber sheet is stretched one way | The smaller axis |
+| W9 | The start view dithered | Refinements 3 m away were half faded in at the start point | The start point competes in the nearest-station rule; refinements fade out 2.5–3.5 m from their station |
+| W10 | Two stations' refinements interleaved as comb patterns | Each faded by its own distance, so neighbours overlapped | Only the nearest station's refinements show, cross-faded over 0.3 m at the boundary |
+| W11 | Unexplored stations reachable, and smeared | 16 views ran out before the far stations | Views capped per station; a station is walkable only if under 12% of its views is still hole or blur afterwards |
+| W12 | A canyon broke into shards at the walking points | One scale and shift per view put each new patch at its own depth | A smooth correction field, exact where geometry exists, spread into the holes |
+| W13 | Stations reported clean while visibly smeared | The cleanliness check rendered at a quarter of the resolution, and texel density scales with it | Checked at the generation resolution |
+| W14 | Stretched fills were never improved | "Regenerate once" also excluded fills, which look stretched from other stations | Only refinements are excluded (they show near their own station only) |
+| W15 | Smeared canyon walls passed the blur test | Even 2–3x magnification of an old texture smears at eye level; the threshold was 4x | Repaint anything within 5 m spreading a texel over more than 2 pixels |
+| W16 | Indoors and in the canyon, walls shattered into shards between patches | Each generated view brings its own monocular depth noise; up close, a corridor's few large surfaces show every mismatch | Plane prior (`planes.py`): the ground, a ceiling and up to four walls are fitted to the panorama's geometry; depth near a plane and facing like it is snapped onto it in the panorama, the photo and every walking view. Snapping slides points along their rays, so the start view is unchanged. On a synthetic corridor with 2% depth noise: 74% of points land exactly on their wall, median error 1.35% → 0.01% |
+| W17 | Looking at a corridor wall from 1.2 m showed a whole new corridor, vanishing point and all | Blurred surfaces were regenerated at full strength; with only a smear for context the model painted the prompt ("a corridor") onto the wall | Holes are generated outright; blurred surfaces are refined image-to-image at 0.45 strength (SDEdit), which keeps the wall, its doors and windows and adds detail |
+| W18 | Walking into the corridor, every view past 3 m was a shredded mosaic | About ten patches painted from different stations, plus the photo's mesh, covered the same walls, each with its own depth a few centimetres off; the depth test interleaved them in slivers (a per-patch colour render showed it) | Drawing each station's patches only near it removed the mosaic but not the shredding (W19) |
+| W19 | Still shredded with one station's patches at a time | The start bubble itself (the photo's layers, the panorama mesh) tears and melts seen from 3–6 m away; those surfaces are sharp, so no hole or blur test ever sent them to the model | A 360° bubble per station: the nearest bubble rendered from there, holes generated and everything within 50 m repainted (far scenery kept), depth estimated for the result, one continuous mesh; the viewer draws only the nearest station's bubble (EXPLORABLE-PLAN, round 2) |
+| W20 | Walking in, a Gothic stone corridor became a modern hotel hallway | The repaint (0.8) followed the prompt, "a corridor", more than the picture | CLIP also picks the style and materials of built places for every prompt ("with gothic stone arches and vaulted ceilings"); repaint at 0.7 |
+| W21 | The ground around a station looked motion-blurred | Seen from a few metres away, the start bubble's ground is magnified 5–10x: long radial streaks the repaint kept as structure | Surfaces magnified more than ~3x are blurred down to their colour layout, plus noise, before the repaint |
+| W22 | Bright blobs at depth edges in station bubbles | Each cut at a depth edge showed the start point's dome, the wrong scenery from there | Each station has its own dome, its own panorama at infinity |
+| W23 | A dotted line like a cable along every ridge, seen from the stations | From a station, the start point's dome (its panorama at infinity) peeks out beside the parallax-shifted 3D ridge, and its land mask, eroded a pixel, called the outermost ridge pixels sky; the repaint kept that thin dark sliver and made it a wire | Exploration widens the dome's (and the photo sky layer's) land mask, so the whole parallax gap is a hole and is generated; the repaint is also written over a rim of sky beyond near silhouettes, so moved edges land whole |
+| W24 | A station taking 20 minutes instead of 4; then CUDA out of memory | Generation peaked at 7.8 of 8 GB and spilled into system memory; with RAM short as well, an allocation failed and wedged the server | The VAE decodes in 512-pixel tiles (peak 6.3 GB); the cache is freed after every view and job, and an out-of-memory error retries once |
+| W25 | Two worlds screen-doored together between stations | The dissolve followed position, so stopping in the band froze it half way | The viewer switches station once another is 0.25 m nearer and dissolves over 450 ms |
+| W26 | Trees beside a walking spot looked torn and wind-swept, with patches of shifted cloud around them | The depth network gives the sky around and through a crown (and beside posts, roofs, rocks) the object's own depth, one flat plateau no depth test sees; meshed, that halo of sky is glued to the tree and detaches as soon as you move, and the repaint turned the tears into streaks | `panorama.separate_sky`, on the start panorama and every station: confident sky becomes a colour palette, and land above the horizon near the sky that matches it is sky again. Indoors there is no confident sky and nothing changes |
+| W27 | A tree next to a side station was still motion-blurred | That station started from the 3 m station's bubble, a repaint of a repaint (the two candidate bubbles were equally near); softness compounds with every hop and the model reads it as motion blur | A station starts from the bubble with the fewest repaints behind it unless another is a metre nearer; motion blur, streaks and bokeh are in the negative prompt |
+| W28 | Overlooks: a valley seen from a hillside became a grey plain a few metres away | The ground prior (nothing below the horizon beyond a level ground at eye height) is needed for water reflections, but wrong from any elevated viewpoint (hills, rooftops, aircraft windows) | CLIP also tells where the photo was taken from (on the ground, from a height, from the air); from a height the prior is off for the panorama, the photo and the stations. And a standing point now needs ground under it: where the panorama sees much farther than a level ground at that distance would be (a drop), none is placed |
+| W29 | A trunk a metre from a station, wiped down to its colours, came back as a blur | One repaint strength per view (0.7): the model kept the wipe's blur | Every pixel gets its own strength (differential diffusion as a step callback on the SDXL pipeline): holes 0.98, wiped smears 0.9, near surfaces 0.7 plus 0.05 per repaint already behind the station's source, far scenery and sky untouched |
+| W30 | Treetops overhead streaked at every outdoor station | A station's upward views used the panorama's "looking up" prompt (open sky; trees, branches, ground in the negative) while repainting treetops and cliffs that were already there | Outdoors, a station's upward views use the scene's own prompt (indoors the ceiling prompt stays) |
+| W31 | Forest canopy a few metres from a station streaked, though the blur test called it sharp | The test measured stretch per texture axis (fwidth); trees at different depths stretch the panorama's surface diagonally, and per axis that still read as about one texel per pixel | Stretch is the smaller singular value of the screen-to-texel Jacobian (any direction); repaint strength rises continuously from 0.7 at a texel per pixel to 0.9 at a third of one |
+| W32 | The spot 6.5 m in, two repaints from the photo, stayed soft or odd (a leaning trunk became a pale slab) | Each spot is repainted from a distorted render of its neighbour's world, and how much structure to keep is a guess: keep too much and the distortions stay, too little and the model invents | Depth guidance (SDXL depth ControlNet, `diffusers/controlnet-depth-sdxl-1.0-mid`, 0.55 GB, optional): every station view is generated along the world's own geometry rendered from the spot (holes filled from the surfaces around them, sky far), so near surfaces can be repainted harder (0.8, plus 0.05 per hop, at most 0.9). Verified on the pine lake: the spot 6.5 m in is a coherent shore (no slab, no turquoise water); 7.1 GB VRAM, about 5 min a station |
+| W33 | Ripple rings and banded rock on the ground round the walking spots (first guided build) | The guidance map held inverse distance, which draws level ground as circles round the station; and faint arcs already on the ground (a photo's waves laid on the ground, depth bumps at each wave) were sharpened at 0.9 and inherited by the next spot | Depth along each view's axis (`explore.view_inverse_depth`); near-level ground drawn exactly level in the guidance map (`GROUND_SNAP` 15%); guided, smears are wiped to their colours alone (`GUIDED_WIPE_SCALE`). Checked view by view against the old guidance and none, then rebuilt: no rings or bands at any spot |
+| W34 | The integrated GPU at full load during a build; the desktop stuttered | The offscreen renderer ran on the integrated GPU (OpenGL picks it by default on an Optimus laptop), which also draws the desktop | `render.py` asks NVIDIA Optimus for the discrete GPU (`VIEWFINDER_RENDER_GPU`, default `discrete`; `integrated` moves it back). It fits beside the generator: 7.1 of 8 GB |
+| W35 | Generated hills behind the start point washed out to a white haze, cut off in steps against the sky | The viewer fogged everything past ~100 m toward a pale horizon colour (meant to hide the single-viewpoint mesh's edge against the dome); the dome itself is unfogged, so the haze ended along the mesh's cells | Fog only for a photo in fog, and for the single-viewpoint world; a generated world on a clear day has none |
+| W36 | What was generated behind you did not belong to the photo's place: a lake among the low granite islands of Ontario got alpine peaks, a mountain meadow and a giant pine sprig | CLIP called it "a mountain lake" (0.63 against 0.27 for "a calm lake among forested hills"), and the prompt carried the cliché into every unseen direction | GeoCLIP places the photo first (`locate.py`); where it is sure (probability within 500 km ≥ 0.6: every correctly placed outdoor photo of eleven regions scored ≥ 0.65, every misplaced one ≤ 0.44), the prompt names the region and the kind of country there, and location breaks close calls between places the photo plausibly shows |
+| W37 | Looking up into the trees from the start point: soft, big blurred branches, a blurred rectangle beside them | The panorama's upward views were always painted as open sky ("no trees, no branches" in the negative), while the forest already painted below them rose into the view; the model drew the trees half-suppressed. Above 45° the panorama was a third as sharp as below. The viewer's isotropic mipmapping also blurred toward the zenith, where the equirectangular texture is squeezed sideways | An upward view whose known pixels are textured (≥ 20% with local grey s.d. > 8: foliage, branches, rock, buildings) is painted "looking up through the treetops" (nature) or "past the rooftops" (towns): trees and buildings may close overhead, land may not. Outdoors, horizon views keep only what they paint up to 35° of elevation: at the top of a frame the model composed a photograph, a big out-of-focus branch hanging into it and a blurred patch beside it; above 35° the tilted views paint the trees as treetops against the sky. Anisotropic filtering (8×) in the viewer and the offline renderer; views are resampled into the panorama bicubically. Above 45° the pine lake's panorama went from a Laplacian variance of 75–157 to 168–227, the hanging branch and blurred patch gone |

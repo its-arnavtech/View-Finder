@@ -36,6 +36,20 @@ def build_parser() -> argparse.ArgumentParser:
             "Larger V2 checkpoints are CC-BY-NC licensed.",
         )
         sub.add_argument("--device", default="auto", help="auto | cpu | cuda (default: auto)")
+        sub.add_argument(
+            "--inpaint",
+            choices=("auto", "lama", "none"),
+            default="auto",
+            help="fill hidden areas and the frame border with LaMa: auto uses it when installed "
+            "(default: %(default)s)",
+        )
+        sub.add_argument(
+            "--generate",
+            choices=("auto", "on", "off"),
+            default="auto",
+            help="generate the full 360° world around the photo with an image model (SDXL, needs an "
+            "NVIDIA GPU); auto uses it when installed (default: %(default)s)",
+        )
         sub.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
     build = commands.add_parser("build", help="build a world from a photo into .glb/.json(/.html)")
@@ -61,7 +75,12 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--tls-key", type=Path, default=None, help="PEM private key for --tls-cert")
     depth_options(serve)
 
-    setup = commands.add_parser("setup", help="download the depth model once (~100 MB, Apache-2.0)")
+    setup = commands.add_parser(
+        "setup",
+        help="download the models once: depth (~100 MB), LaMa (~93 MB), scene CLIP (~1.7 GB), "
+        "the SDXL surround generator (~7 GB) and its depth guidance (~0.55 GB)",
+    )
+    setup.add_argument("--no-generator", action="store_true", help="skip the ~9.3 GB generator, depth guidance and CLIP models")
     setup.add_argument("--depth-model-id", default=DEPTH_ANYTHING_SMALL)
     setup.add_argument("-v", "--verbose", action="store_true")
     return parser
@@ -84,9 +103,48 @@ def _load(args: argparse.Namespace):
     return load_estimator(args.depth_model, device=args.device, model_id=args.depth_model_id)
 
 
+def _load_inpainter(args: argparse.Namespace):
+    """The LaMa inpainter, or None. ``auto`` degrades to the rule-based fills
+    when the model or ONNX Runtime is missing; ``lama`` insists."""
+    from .inpaint import InpainterUnavailable, load_inpainter
+
+    if args.inpaint == "none":
+        return None
+    try:
+        return load_inpainter()
+    except InpainterUnavailable as exc:
+        if args.inpaint == "lama":
+            raise
+        logger.info("Inpainting off: %s", exc)
+        return None
+
+
+def _load_generator(args: argparse.Namespace):
+    """(backend, classify) for the generated surround, or (None, None).
+    ``auto`` falls back to the profile surround when the model, diffusers or
+    a GPU is missing; ``on`` insists."""
+    from .generate import GeneratorUnavailable, load_backend
+    from .scene import clip_cached, load_scene_classifier
+
+    if args.generate == "off":
+        return None, None
+    try:
+        backend = load_backend()
+    except GeneratorUnavailable as exc:
+        if args.generate == "on":
+            raise
+        logger.info("Generated surround off: %s", exc)
+        return None, None
+    # On the CPU: the GPU memory goes to the generator (CLIP takes ~1 s there).
+    classify = load_scene_classifier("cpu").classify if clip_cached() else None
+    return backend, classify
+
+
 def _build(args: argparse.Namespace) -> int:
     from .export import write_world
     from .ingest import ImageInputError
+    from .generate import GeneratorUnavailable
+    from .inpaint import InpainterUnavailable
     from .pipeline import build_world
 
     if not args.photo.is_file():
@@ -94,7 +152,9 @@ def _build(args: argparse.Namespace) -> int:
         return 2
     try:
         estimator = _load(args)
-    except DepthModelUnavailable as exc:
+        inpainter = _load_inpainter(args)
+        generator, classify = _load_generator(args)
+    except (DepthModelUnavailable, InpainterUnavailable, GeneratorUnavailable) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -103,7 +163,15 @@ def _build(args: argparse.Namespace) -> int:
             logger.debug("%-12s %3.0f%%", stage, fraction * 100)
 
     try:
-        result = build_world(args.photo, profile=args.quality, estimator=estimator, progress=progress)
+        result = build_world(
+            args.photo,
+            profile=args.quality,
+            estimator=estimator,
+            inpainter=inpainter,
+            generator=generator,
+            classify=classify,
+            progress=progress,
+        )
     except ImageInputError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -128,14 +196,24 @@ def _build(args: argparse.Namespace) -> int:
 
 
 def _serve(args: argparse.Namespace) -> int:
+    import faulthandler
+
+    from .generate import GeneratorUnavailable
+    from .inpaint import InpainterUnavailable
     from .server import ServeConfig, create_server, server_urls
+
+    # A crash inside a GPU driver or native library otherwise ends a
+    # long-running server with no trace at all.
+    faulthandler.enable()
 
     if bool(args.tls_cert) != bool(args.tls_key):
         print("error: --tls-cert and --tls-key must be given together", file=sys.stderr)
         return 2
     try:
         estimator = _load(args)
-    except DepthModelUnavailable as exc:
+        inpainter = _load_inpainter(args)
+        generator, classify = _load_generator(args)
+    except (DepthModelUnavailable, InpainterUnavailable, GeneratorUnavailable) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     config = ServeConfig(
@@ -151,7 +229,7 @@ def _serve(args: argparse.Namespace) -> int:
         tls_key=args.tls_key,
     )
     try:
-        server = create_server(config, estimator)
+        server = create_server(config, estimator, inpainter, generator=generator, classify=classify)
     except OSError as exc:
         print(f"error: cannot listen on {args.host}:{args.port} ({exc})", file=sys.stderr)
         return 1
@@ -164,7 +242,16 @@ def _serve(args: argparse.Namespace) -> int:
         print("WARNING: no access token: anyone on this network can use the engine.")
     if args.host in ("127.0.0.1", "localhost", "::1"):
         print("Only this computer can connect. Use --host 0.0.0.0 to allow a phone on your Wi-Fi.")
-    print(f"Depth: {estimator.describe()['estimator']} on {estimator.describe()['device']}. Ctrl+C to stop.")
+    print(f"Depth: {estimator.describe()['estimator']} on {estimator.describe()['device']}.")
+    if inpainter is None:
+        print("Inpainting: off (rule-based fills). `view-finder world setup` installs LaMa.")
+    else:
+        print("Inpainting: LaMa.")
+    if generator is None:
+        print("Surround: soft colour profile. `view-finder world setup` installs the generator (needs an NVIDIA GPU).")
+    else:
+        print("Surround: generated 360° world (SDXL). Each world takes a few minutes.")
+    print("Ctrl+C to stop.")
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
@@ -176,18 +263,53 @@ def _serve(args: argparse.Namespace) -> int:
 
 
 def _setup(args: argparse.Namespace) -> int:
+    from . import inpaint
     from .depth import download_model, model_cached
 
+    installed: list[str] = []
     if model_cached(args.depth_model_id):
         print(f"Depth model {args.depth_model_id} is already installed.")
-        return 0
-    print(f"Downloading {args.depth_model_id} (~100 MB) into the Hugging Face cache…")
+    else:
+        print(f"Downloading {args.depth_model_id} (~100 MB) into the Hugging Face cache…")
+        try:
+            installed += download_model(args.depth_model_id)
+        except Exception as exc:
+            print(f"error: download failed: {exc}", file=sys.stderr)
+            return 1
+    if inpaint.cached_model_path():
+        print("Inpainting model (LaMa) is already installed.")
+    else:
+        print(f"Downloading {inpaint.LAMA_REPO} (~93 MB) into the Hugging Face cache…")
+        try:
+            installed.append(inpaint.download_model())
+        except Exception as exc:
+            print(f"error: download failed: {exc}", file=sys.stderr)
+            return 1
+    if not args.no_generator:
+        from . import generate, scene
+
+        for label, ready, fetch in (
+            ("Scene model (CLIP ViT-L/14, ~1.7 GB)", scene.clip_cached, scene.download_model),
+            ("Surround generator (SDXL inpainting, ~7 GB)", generate.models_cached, generate.download_models),
+            ("Depth guidance (SDXL depth ControlNet, ~0.55 GB)", generate.control_cached, generate.download_control),
+        ):
+            if ready():
+                print(f"{label} is already installed.")
+                continue
+            print(f"Downloading {label} into the Hugging Face cache…")
+            try:
+                result = fetch()
+            except Exception as exc:
+                print(f"error: download failed: {exc}", file=sys.stderr)
+                return 1
+            installed += result if isinstance(result, list) else [result]
     try:
-        paths = download_model(args.depth_model_id)
-    except Exception as exc:
-        print(f"error: download failed: {exc}", file=sys.stderr)
-        return 1
-    print(json.dumps({"installed": paths}, indent=2))
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        print("note: onnxruntime is not installed, so LaMa stays off. "
+              "pip install -r viewfinder/requirements-world.txt")
+    if installed:
+        print(json.dumps({"installed": installed}, indent=2))
     return 0
 
 

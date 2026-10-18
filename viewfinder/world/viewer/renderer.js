@@ -31,6 +31,8 @@
     "uniform float uFog;",
     "uniform float uFogDensity;",
     "uniform vec3 uFogColor;",
+    "uniform float uFadeFrom;",
+    "uniform float uFade;",
     "varying vec2 vUv;",
     "varying vec4 vColor;",
     "varying float vDistance;",
@@ -38,6 +40,10 @@
     // Silhouette cells discard the texels that belong to the far side, so
     // edges follow the photo's pixels rather than the mesh grid.
     "  if (uMasked > 0.5 && texture2D(uMask, vUv).r < 0.5) discard;",
+    // Screen-door fade between stations (interleaved gradient noise):
+    // partial transparency with no sorting.
+    "  float noise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));",
+    "  if (noise < uFadeFrom || noise >= uFade) discard;",
     "  vec4 color = mix(vColor, texture2D(uTexture, vUv), uTextured);",
     "  float d = uFogDensity * vDistance;",
     "  float fog = uFog * (1.0 - exp(-d * d));",
@@ -51,6 +57,19 @@
 
   // Layers drawn behind everything else, without writing depth.
   var BACKDROP = { dome: 0, sky: 1 };
+  // Each standing point the world was generated around (the start point,
+  // and every station with a bubble in manifest.overlays) owns its meshes,
+  // and only the current station's are drawn: one coherent surface wherever
+  // you stand. Walking into another station's area (nearer to it by
+  // STATION_HYSTERESIS m, so a boundary never flickers) dissolves into its
+  // world over STATION_DISSOLVE ms. A dissolve tied to position instead
+  // left both worlds screen-doored together wherever you stopped between.
+  var STATION_HYSTERESIS = 0.25;
+  var STATION_DISSOLVE = 450;
+  function smoothstep(a, b, x) {
+    var t = Math.min(Math.max((x - a) / (b - a), 0), 1);
+    return t * t * (3 - 2 * t);
+  }
 
   /* ---------------- tiny column-major mat4 helpers ---------------- */
   function perspective(fovy, aspect, near, far) {
@@ -104,6 +123,11 @@
     if (!gl) throw new Error("This browser cannot show 3D (WebGL is unavailable or disabled).");
     this.gl = gl;
     this.uint32 = this.webgl2 || !!gl.getExtension("OES_element_index_uint");
+    // The panorama's texture is squeezed sideways toward the zenith; plain
+    // mipmapping then picks a level by the squeezed axis and blurs the other
+    // (treetops overhead came out soft). Anisotropic filtering samples along it.
+    this.anisotropic = gl.getExtension("EXT_texture_filter_anisotropic") ||
+      gl.getExtension("WEBKIT_EXT_texture_filter_anisotropic") || gl.getExtension("MOZ_EXT_texture_filter_anisotropic");
     this.program = this._program(VERTEX, FRAGMENT);
     var p = this.program;
     this.loc = {
@@ -119,6 +143,8 @@
       fog: gl.getUniformLocation(p, "uFog"),
       fogDensity: gl.getUniformLocation(p, "uFogDensity"),
       fogColor: gl.getUniformLocation(p, "uFogColor"),
+      fadeFrom: gl.getUniformLocation(p, "uFadeFrom"),
+      fade: gl.getUniformLocation(p, "uFade"),
     };
   };
 
@@ -166,6 +192,10 @@
     if (this.webgl2 || pot) {
       gl.generateMipmap(gl.TEXTURE_2D);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      if (this.anisotropic) {
+        var most = gl.getParameter(this.anisotropic.MAX_TEXTURE_MAX_ANISOTROPY_EXT);
+        gl.texParameterf(gl.TEXTURE_2D, this.anisotropic.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, most));
+      }
     } else {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); // WebGL1 cannot mip NPOT
     }
@@ -191,7 +221,10 @@
       if (self.lost) return;
       var textures = images.map(function (image) { return self._texture(image); });
       var layers = scene.manifest.layers || {};
+      var overlays = scene.manifest.overlays || {};
       var draws = scene.meshes.map(function (mesh) {
+        // The dome and sky, and each station's own dome ("walk0_dome").
+        var backdrop = mesh.name in BACKDROP || /_dome$/.test(mesh.name);
         var indices = mesh.indices;
         if (indices instanceof Uint32Array) {
           if (!self.uint32) throw new Error("This device cannot draw meshes this large; rebuild with the mobile profile.");
@@ -207,15 +240,33 @@
           texture: mesh.image >= 0 ? textures[mesh.image] : null,
           mask: mesh.mask >= 0 ? textures[mesh.mask] : null,
           fog: layers[mesh.name] ? !!layers[mesh.name].fog : true,
-          backdrop: mesh.name in BACKDROP,
-          // The ground disc is coplanar with the photo's own ground: push it
-          // back in depth so real geometry always wins where it exists.
-          offset: mesh.name === "ground",
-          order: mesh.name in BACKDROP ? BACKDROP[mesh.name] : 10,
+          backdrop: backdrop,
+          // The ground disc is coplanar with the photo's own ground, and the
+          // generated surround overlaps the photo's edge at the same depth:
+          // push both back so the photo always wins where it exists.
+          offset: mesh.name === "ground" || mesh.name === "surround",
+          // A station's bubble or dome, else the start point's (but the
+          // sky, drawn from everywhere).
+          station: overlays[mesh.name] ? overlays[mesh.name].station : mesh.name === "sky" ? null : [0, 0, 0],
+          order: mesh.name in BACKDROP ? BACKDROP[mesh.name] : backdrop ? 0 : 10,
         };
       });
       draws.sort(function (a, b) { return a.order - b.order; });
-      self.gpu = { draws: draws };
+      var stations = [[0, 0, 0]];
+      draws.forEach(function (d) {
+        if (d.station && !stations.some(function (s) {
+          return Math.abs(s[0] - d.station[0]) + Math.abs(s[2] - d.station[2]) < 1e-6;
+        })) stations.push(d.station);
+      });
+      draws.forEach(function (d) {
+        d.stationIndex = d.station ? stations.findIndex(function (s) {
+          return Math.abs(s[0] - d.station[0]) + Math.abs(s[2] - d.station[2]) < 1e-6;
+        }) : -1;
+      });
+      self.gpu = { draws: draws, stations: stations };
+      self.station = 0; // the start point
+      self.previous = -1; // the station being dissolved away from, if any
+      self.dissolveStart = 0;
       self.triangles = draws.reduce(function (sum, draw) { return sum + draw.count / 3; }, 0);
     });
   };
@@ -256,7 +307,29 @@
     gl.uniform1i(loc.mask, 1);
     gl.activeTexture(gl.TEXTURE0);
 
+    var distances = this.gpu.stations.map(function (s) {
+      return Math.hypot(camera.eye[0] - s[0], camera.eye[2] - s[2]);
+    });
+    var nearest = distances.indexOf(Math.min.apply(null, distances));
+    var now = root.performance.now();
+    if (nearest !== this.station && distances[this.station] - distances[nearest] > STATION_HYSTERESIS) {
+      this.previous = this.station;
+      this.station = nearest;
+      this.dissolveStart = now;
+    }
+    // The two worlds take complementary halves of a screen-door pattern
+    // during the dissolve, so every pixel shows one of them.
+    var progress = this.previous >= 0 ? smoothstep(0, 1, (now - this.dissolveStart) / STATION_DISSOLVE) : 1;
+    if (progress >= 1) this.previous = -1;
+    var current = this.station, previous = this.previous;
     this.gpu.draws.forEach(function (draw) {
+      var from = 0, fade = 1;
+      if (draw.stationIndex === current) fade = progress;
+      else if (draw.stationIndex === previous) from = progress;
+      else if (draw.stationIndex >= 0) return;
+      if (fade <= from) return;
+      gl.uniform1f(loc.fadeFrom, from);
+      gl.uniform1f(loc.fade, fade);
       gl.depthMask(!draw.backdrop);
       gl.bindBuffer(gl.ARRAY_BUFFER, draw.position);
       gl.enableVertexAttribArray(loc.position);
@@ -295,6 +368,7 @@
       if (draw.offset) gl.disable(gl.POLYGON_OFFSET_FILL);
     });
     gl.depthMask(true);
+    return this.previous >= 0; // still dissolving: draw again next frame
   };
 
   root.WorldRenderer = Renderer;

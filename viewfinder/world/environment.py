@@ -10,6 +10,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from .camera import Intrinsics
+    from .inpaint import Inpainter
 
 # Fraction of the frame, measured in from each edge, whose disparity gradient
 # is extrapolated across the pad.
@@ -150,18 +151,23 @@ def extend_frame(
     sky: np.ndarray,
     pad: tuple[int, int],
     fade_to: np.ndarray | None = None,
+    inpainter: "Inpainter | None" = None,
 ) -> PaddedCanvas:
     """Pad the photo on every side with a soft, depth-consistent continuation.
 
-    Colour goes stretched edge → blurred → ``fade_to`` (the dome's colour in each
-    pad pixel's direction) across the pad, so that when the viewer turns past
-    the photo's edge, the edge dissolves into the surrounding sky and ground
-    instead of ending in a hard wall.
+    With an ``inpainter``, the pad is outpainted: rock, foliage, walls and
+    paving carry on past the frame. Without one, colour goes stretched edge
+    → blurred. Either way it then fades to ``fade_to`` (the dome's colour in
+    each pad pixel's direction) toward the outer border, so that when the
+    viewer turns past the photo's edge, the edge dissolves into the
+    surrounding sky and ground instead of ending in a hard wall.
     """
     height, width = disparity.shape
     pad_y, pad_x = pad
     weight = _pad_weight(height, width, pad_y, pad_x)[..., None]
     dy, dx = _pad_distances(height, width, pad_y, pad_x)
+    original = np.zeros((height + 2 * pad_y, width + 2 * pad_x), dtype=bool)
+    original[pad_y : pad_y + height, pad_x : pad_x + width] = True
 
     # Edge pixels are stretched outward, never mirrored: a mirrored border
     # puts a symmetric copy of the photo's edge right beside it, and that
@@ -170,6 +176,12 @@ def extend_frame(
     # is blurred *along* its edge, more the farther out it is: side pads
     # vertically, top and bottom pads horizontally.
     stretched = cv2.copyMakeBorder(rgb, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_REPLICATE)
+    if inpainter is not None and (pad_x or pad_y):
+        canvas = inpainter.inpaint(stretched, ~original).astype(np.float32)
+        # Outpainted texture is worth keeping: fade only the outer part.
+        distance = np.maximum(dy[:, None], dx[None, :])
+        weight = _smoothstep((distance - 0.35) / 0.65)[..., None]
+        return _finish_canvas(rgb, canvas, disparity, sky, pad_y, pad_x, weight, fade_to, original)
     long_side = max(height, width)
     sigmas = (long_side / 50.0, long_side / 18.0, long_side / 8.0)
     # Only the pad strips need it: side strips (full height) and end strips
@@ -185,6 +197,21 @@ def extend_frame(
     # In the corners both apply; weight by which edge is nearer.
     side_share = (dx[None, :] / np.maximum(dx[None, :] + dy[:, None], 1e-6))[..., None]
     canvas = sides * side_share + ends * (1.0 - side_share)
+    return _finish_canvas(rgb, canvas, disparity, sky, pad_y, pad_x, weight, fade_to, original)
+
+
+def _finish_canvas(
+    rgb: np.ndarray,
+    canvas: np.ndarray,
+    disparity: np.ndarray,
+    sky: np.ndarray,
+    pad_y: int,
+    pad_x: int,
+    weight: np.ndarray,
+    fade_to: np.ndarray | None,
+    original: np.ndarray,
+) -> PaddedCanvas:
+    height, width = disparity.shape
     if fade_to is not None:
         fade_weight = 0.95 * weight
         canvas = canvas * (1.0 - fade_weight) + fade_to.astype(np.float32) * fade_weight
@@ -198,9 +225,6 @@ def extend_frame(
     ).astype(bool)
     padded_disparity = _extrapolate_disparity(disparity, pad_y, pad_x)
     padded_disparity[sky_padded] = 0.0
-
-    original = np.zeros(sky_padded.shape, dtype=bool)
-    original[pad_y : pad_y + height, pad_x : pad_x + width] = True
     return PaddedCanvas(canvas_rgb, padded_disparity, sky_padded, pad_x, pad_y, original)
 
 

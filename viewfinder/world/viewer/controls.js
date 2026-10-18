@@ -43,10 +43,15 @@
     this.center = nav.center;
     this.half = nav.half_extents;
     this.pivotDefault = Math.max(0.5, (nav.near_field_depth || 2) * 1.5);
-    this.speed = Math.max(0.02, this.half[2]);
+    // A generated world is walkable and in metres: walking pace, a real
+    // neck, a small idle sway. A single-photo world scales all three to its
+    // small navigation box instead.
+    this.walk = !!nav.walk;
+    this.speed = this.walk ? 2.0 : Math.max(0.02, this.half[2]);
     // Eye-to-neck distance for look mode, exaggerated from anatomy so the
     // parallax is noticeable, and kept inside the navigation box.
-    this.neck = this.half[0] * 0.6;
+    this.neck = this.walk ? 0.12 : this.half[0] * 0.6;
+    this.swayScale = this.walk ? [0.15, 0.04] : [this.half[0] * 0.55, this.half[1] * 0.2];
     this.reset();
   };
 
@@ -86,6 +91,24 @@
   Controls.prototype._clampPosition = function (p) {
     if (this.freeRoam) return p;
     var c = this.center, h = this.half;
+    var stations = this.manifest.navigation.stations;
+    if (this.walk && stations && stations.length) {
+      // Walk only where the world was generated: within reach of a point it
+      // was explored from (the start point included).
+      var reach = this.manifest.navigation.reach || 3;
+      var best = null, bestDistance = Infinity;
+      for (var i = 0; i < stations.length; i++) {
+        var dx = p[0] - stations[i][0], dz = p[2] - stations[i][1];
+        var d = Math.hypot(dx, dz);
+        if (d < bestDistance) { bestDistance = d; best = stations[i]; }
+      }
+      var x = p[0], z = p[2];
+      if (bestDistance > reach) {
+        x = best[0] + (p[0] - best[0]) * reach / bestDistance;
+        z = best[1] + (p[2] - best[1]) * reach / bestDistance;
+      }
+      return [x, clamp(p[1], c[1] - h[1], c[1] + h[1]), z];
+    }
     return [clamp(p[0], c[0] - h[0], c[0] + h[0]), clamp(p[1], c[1] - h[1], c[1] + h[1]), clamp(p[2], c[2] - h[2], c[2] + h[2])];
   };
 
@@ -147,7 +170,7 @@
     if (this.interacted) return false;
     var t = seconds * 1.4;
     var fade = Math.min(1, seconds / 0.8);
-    this.swayOffset = [Math.sin(t) * this.half[0] * 0.55 * fade, Math.sin(t * 2) * this.half[1] * 0.2 * fade, 0];
+    this.swayOffset = [Math.sin(t) * this.swayScale[0] * fade, Math.sin(t * 2) * this.swayScale[1] * fade, 0];
     return true;
   };
 
@@ -288,7 +311,7 @@
         } else {
           var nx = clamp((sideAxis - base.side) / 25, -1, 1), ny = clamp((pitchAxis - base.pitch) / 25, -1, 1);
           self.tiltYaw = self.tiltPitch = 0;
-          self.swayOffset = [nx * self.half[0], -ny * self.half[1], 0];
+          self.swayOffset = self.walk ? [nx * 0.3, -ny * 0.1, 0] : [nx * self.half[0], -ny * self.half[1], 0];
         }
         self.changed();
       };

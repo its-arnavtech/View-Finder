@@ -111,6 +111,71 @@ def surface_mesh(
     return compact(name, positions, triangles[keep], uvs=uvs, texture=texture)
 
 
+def drop_islands(land: np.ndarray, min_fraction: float = 0.0005) -> np.ndarray:
+    """``land`` without components smaller than ``min_fraction`` of the grid
+    (and never fewer than 16 vertices). A stray patch of land in open sky (a
+    branch tip, a speck of haze the depth network took for a surface) floats
+    at its own depth and shows as a ghost the moment the eye moves; the dome
+    behind shows the same pixels at infinity instead."""
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(land.astype(np.uint8), connectivity=8)
+    if count <= 1:
+        return land
+    smallest = max(16, int(min_fraction * land.size))
+    keep = np.zeros(count, dtype=bool)
+    keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= smallest
+    return keep[labels]
+
+
+def surround_mesh(
+    name: str,
+    disparity: np.ndarray,
+    exclude: np.ndarray,
+    jump: float,
+    min_disparity: float,
+    texture: str,
+) -> MeshData | None:
+    """A closed 360° surface from an equirectangular grid of inverse distance.
+
+    Args:
+        disparity: (gh, gw + 1) inverse distance at the vertices of an
+            equirectangular grid: rows from the zenith to the nadir, columns
+            from azimuth -180° to +180° inclusive (the last column repeats the
+            first, so the texture seam closes).
+        exclude: (gh, gw + 1) bool, vertices covered by another layer.
+        jump: maximum *relative* disparity spread, (max - min) / max, within
+            a kept triangle. Only big jumps are cut: a cut at a modest one
+            opens a stair-stepped hole as soon as the eye moves (even the
+            neck pivot of turning your head), and the generated surround has
+            no per-pixel silhouettes to hide it. A modest jump stretches
+            smoothly instead, which reads as natural at small movements.
+        min_disparity: vertices farther than ``1 / min_disparity`` (open
+            sky, haze) are left to the dome behind.
+    """
+    rows, columns = disparity.shape
+    azimuth = np.linspace(-np.pi, np.pi, columns, dtype=np.float32)
+    elevation = np.linspace(np.pi / 2, -np.pi / 2, rows, dtype=np.float32)
+    a, e = np.meshgrid(azimuth, elevation)
+    directions = np.stack([np.sin(a) * np.cos(e), np.sin(e), -np.cos(a) * np.cos(e)], axis=-1)
+    land = drop_islands(disparity >= min_disparity)
+    # Land is extended one vertex into the sky at its own depth, so the cells
+    # along a ridge or treeline are kept whole and a per-pixel keep-mask
+    # (sky = discard) draws the skyline. Cutting them instead left a
+    # one-cell staircase against the sky that shows as soon as the eye moves.
+    near_land = cv2.dilate(np.where(land, disparity, 0.0).astype(np.float32), np.ones((3, 3), np.uint8))
+    fringe = ~land & (near_land >= min_disparity)
+    disparity = np.where(fringe, near_land, disparity).astype(np.float32)
+    usable = (land | fringe) & ~exclude
+    distance = 1.0 / np.maximum(disparity, min_disparity)
+    positions = (directions * distance[..., None]).astype(np.float32)
+    u, v = np.meshgrid(np.linspace(0.0, 1.0, columns), np.linspace(0.0, 1.0, rows))
+    uvs = np.stack([u, v], axis=-1).astype(np.float32)
+    triangles = grid_triangles(rows, columns)
+    keep = usable.reshape(-1)[triangles].all(axis=1)
+    nearest = disparity.reshape(-1)[triangles].max(axis=1)
+    keep &= triangle_spread(disparity, triangles) <= jump * np.maximum(nearest, 1e-6)
+    return compact(name, positions, triangles[keep], uvs=uvs, texture=texture)
+
+
 def sky_mesh(
     rays: np.ndarray, uvs: np.ndarray, sky: np.ndarray, radius: float, texture: str
 ) -> MeshData | None:

@@ -66,6 +66,9 @@ def fov_for(manifest: dict, aspect: float) -> float:
     if camera.get("projection") == "cylindrical":
         return min(max(vfov * 1.25, math.radians(50)), math.radians(80))
     hfov = math.radians(camera["hfov_deg"])
+    if manifest.get("surround", {}).get("generator", "none") != "none":
+        fit = 2 * math.atan(math.tan(hfov / 2) / aspect)
+        return min(max(vfov, fit), math.radians(95))
     padded_height = manifest["source"].get("padded", [0, camera["height"]])[1]
     padded_vfov = 2 * math.atan(padded_height / 2 / camera["fy"])
     fit_width = 2 * math.atan(math.tan(hfov / 2) / aspect)
@@ -268,15 +271,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=REPO / "local-data" / "world-eval")
     parser.add_argument("--tag", default="", help="suffix for output names, e.g. before/after")
     parser.add_argument("--depth-model", default="depth-anything-v2-small")
+    parser.add_argument("--inpaint", choices=("lama", "none"), default="lama",
+                        help="build with LaMa inpainting (as the server does when it is installed) or without")
     args = parser.parse_args(argv)
 
     from viewfinder.world import build_world
     from viewfinder.world.depth import load_estimator
 
     estimator = load_estimator(args.depth_model)
+    inpainter = None
+    if args.inpaint == "lama":
+        from viewfinder.world.inpaint import load_inpainter
+
+        inpainter = load_inpainter()
     args.out.mkdir(parents=True, exist_ok=True)
     for photo in args.photos:
-        result = build_world(photo, profile=args.quality, estimator=estimator)
+        result = build_world(photo, profile=args.quality, estimator=estimator, inpainter=inpainter)
         name = f"{photo.stem[:40]}_{args.quality}{('_' + args.tag) if args.tag else ''}.png"
         contact_sheet(result.glb, f"{photo.name}  ({args.quality}, {len(result.glb) / 1e6:.1f} MB)").save(args.out / name)
         print(args.out / name, flush=True)

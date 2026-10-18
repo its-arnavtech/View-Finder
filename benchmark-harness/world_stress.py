@@ -117,7 +117,7 @@ def real_photos(photos: int, street: int, seed: int) -> list[tuple[Path, str]]:
     return chosen
 
 
-def run_one(path: Path, kind: str, should_build: bool, quality: str, estimator) -> dict:
+def run_one(path: Path, kind: str, should_build: bool, quality: str, estimator, inpainter=None) -> dict:
     row: dict = {"name": path.name, "kind": kind, "expected": "world" if should_build else "rejection"}
     try:
         with Image.open(path) as probe:
@@ -127,7 +127,7 @@ def run_one(path: Path, kind: str, should_build: bool, quality: str, estimator) 
         row["size"], row["mode"] = "?", "?"
     started = time.perf_counter()
     try:
-        result = build_world(path, profile=quality, estimator=estimator)
+        result = build_world(path, profile=quality, estimator=estimator, inpainter=inpainter)
     except ImageInputError as exc:
         row.update(outcome="rejected", detail=str(exc), ok=not should_build)
         return row
@@ -163,9 +163,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--out", type=Path, default=REPO / "local-data" / "world-stress")
     parser.add_argument("--skip-edge", action="store_true")
+    parser.add_argument("--inpaint", choices=("lama", "none"), default="none",
+                        help="also run LaMa inpainting (slow on CPU: ~2-10 s per photo)")
     args = parser.parse_args(argv)
 
     estimator = load_estimator(args.depth_model)
+    inpainter = None
+    if args.inpaint == "lama":
+        from viewfinder.world.inpaint import load_inpainter
+
+        inpainter = load_inpainter()
     inputs: list[tuple[Path, str, bool]] = [(p, k, True) for p, k in real_photos(args.photos, args.street, args.seed)]
     if not args.skip_edge:
         sky_source = REPO / "images" / "Alaska_00001_30657829_8217c3e79d_22_58542460@N00.jpg"
@@ -173,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rows = []
     for index, (path, kind, should_build) in enumerate(inputs, 1):
-        row = run_one(path, kind, should_build, args.quality, estimator)
+        row = run_one(path, kind, should_build, args.quality, estimator, inpainter)
         rows.append(row)
         flag = "ok  " if row["ok"] else "FAIL"
         print(f"[{index:3}/{len(inputs)}] {flag} {kind:6} {row['outcome']:8} {path.name[:48]:48} "
