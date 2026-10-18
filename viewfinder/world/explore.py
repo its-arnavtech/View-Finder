@@ -282,6 +282,17 @@ def render_canvas(
     return Canvas(rgb, distance, coverage, density)
 
 
+def depth_guided(backend: ViewBackend, scene: Scene) -> bool:
+    """Whether a station's views follow the world's geometry (depth
+    ControlNet): only for natural scenes. The geometry is the neighbouring
+    bubble's, seen from elsewhere; its errors bend what is painted along it.
+    A bent trunk or rock reads as natural; a bent wall does not (the Gothic
+    corridor's walls and ribs melted at 6.5 m, painted along a bowl-shaped
+    depth map). Built places are repainted unguided; their straight lines
+    come from the model, and their depth from the repaint (issue #3)."""
+    return bool(getattr(backend, "depth_control", False)) and scene.setting == "nature"
+
+
 def control_disparity(canvas: Canvas) -> np.ndarray:
     """The station's geometry as inverse distance (1/m), equirectangular:
     what the canvas rendered, with the holes filled in from around them (a
@@ -369,7 +380,7 @@ def heal_canvas(
     plan = view_plan(view_size)
     generated_views = 0
     band = max(4, view_size // 20)
-    guided = bool(getattr(backend, "depth_control", False))
+    guided = depth_guided(backend, scene)
     if guided:
         near_strength = min(GUIDED_HEAL_STRENGTH + HOP_STRENGTH * hops, GUIDED_MAX_HEAL_STRENGTH)
         geometry = control_disparity(canvas)
@@ -648,7 +659,7 @@ def explore(
     from .surround import DEPTH_SIZE
 
     started = time.perf_counter()
-    result = Exploration(stations=stations, depth_guided=bool(getattr(backend, "depth_control", False)))
+    result = Exploration(stations=stations, depth_guided=depth_guided(backend, scene))
     built: list[np.ndarray] = [np.zeros(3)]
     hops: list[int] = [0]  # repaints between each bubble and the photo
     view_size = panorama_size[0] // 4
