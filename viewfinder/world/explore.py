@@ -434,7 +434,7 @@ def heal_canvas(
         taper = np.clip(border / max(1.0, 0.04 * view.size), 0.0, 1.0)
         taper = np.where(inside, taper * taper * (3 - 2 * taper), 0.0)
         weight = cv2.remap(soft, i, j, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT) * taper
-        sampled = cv2.remap(merged, i, j, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        sampled = cv2.remap(merged, i, j, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)  # uint8: saturates
         new = ~known & (taper >= 1.0)
         rgb[new] = sampled[new]
         weight = np.where(editable, weight, 0.0)[..., None]

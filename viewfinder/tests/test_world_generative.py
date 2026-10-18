@@ -270,3 +270,39 @@ def test_the_viewpoint_does_not_invalidate_a_generated_panorama():
     assert surround._cache_key(rgb, camera, ground, {}) == surround._cache_key(rgb, camera, located, {})
     named = replace(ground, region="Ontario, Canada")
     assert surround._cache_key(rgb, camera, ground, {}) != surround._cache_key(rgb, camera, named, {})
+
+
+def test_upward_views_over_trees_are_painted_as_a_canopy():
+    """Looking up where trees already rise into the view, the open-sky prompt
+    (no trees, no branches) fought them into big blurred branches."""
+    from viewfinder.world.generate import CANOPY_FRACTION, textured_fraction
+
+    rng = np.random.default_rng(0)
+    known = np.ones((64, 64), bool)
+    foliage = rng.integers(0, 255, (64, 64, 3), dtype=np.uint8)
+    sky = np.full((64, 64, 3), (120, 170, 230), np.uint8)
+    assert textured_fraction(foliage, known) >= CANOPY_FRACTION
+    assert textured_fraction(sky, known) < CANOPY_FRACTION
+    forest = Scene("a dense forest", "nature", "on a sunny day", 0.9)
+    assert "treetops" in forest.prompt("canopy") and "trees" not in forest.negative("canopy")
+    assert "ground" in forest.negative("canopy")  # land may still not close overhead
+    street = Scene("a city street lined with buildings", "urban", "on a sunny day", 0.9)
+    assert "rooftops" in street.prompt("canopy") and "buildings" not in street.negative("canopy")
+    room = Scene("a corridor", "indoor", "lit by indoor lights", 0.9)
+    assert room.prompt("canopy") == room.prompt("up")  # indoors: the ceiling
+
+
+def test_horizon_views_leave_the_upper_sky_to_the_tilted_views():
+    from viewfinder.world.generate import HORIZON_TOP
+    from viewfinder.world.panorama import View, blend_view, equirect_directions
+
+    panorama = np.zeros((128, 256, 3), np.uint8)
+    known = np.zeros((128, 256), bool)
+    view = View(0.0, 0.0, 100.0, 64)
+    filled = blend_view(panorama, known, known.copy(), np.full((64, 64, 3), 200, np.uint8),
+                        np.zeros((64, 64), np.float32), view, top_deg=HORIZON_TOP)
+    elevation = np.degrees(np.arcsin(equirect_directions(256, 128)[..., 1]))
+    assert filled.any() and elevation[filled].max() <= HORIZON_TOP + 1e-6
+    unlimited = blend_view(np.zeros_like(panorama), np.zeros_like(known), known.copy(),
+                           np.full((64, 64, 3), 200, np.uint8), np.zeros((64, 64), np.float32), view)
+    assert elevation[unlimited].max() > HORIZON_TOP + 5

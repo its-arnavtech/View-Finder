@@ -360,6 +360,12 @@ HORIZON = (0.0, 60.0, -60.0, 120.0, -120.0, 180.0)
 #: open sky (or a ceiling, indoors) above.
 UPWARD_PITCH = 50.0
 UPWARD = (0.0, 90.0, 180.0, -90.0)
+#: Outdoors a horizon view keeps only what it paints up to this elevation;
+#: the tilted views paint everything above. At the top of a frame the model
+#: composes a photograph: a big out-of-focus branch hanging into it, a
+#: blurred patch beside it. Looking up, the same trees are painted as
+#: treetops against the sky.
+HORIZON_TOP = 35.0
 VIEW_FOV = 100.0
 
 
@@ -413,6 +419,10 @@ def complete_panorama(
         hole = ~known_view
         if hole.mean() > 0.003:
             direction = "up" if view.pitch_deg > 30 else ("down" if view.pitch_deg < -30 else "around")
+            if direction == "up" and not scene.enclosed and textured_fraction(image, known_view) >= CANOPY_FRACTION:
+                # Trees (or anything) already rise into the view from below:
+                # the open-sky prompt fought them into big blurred branches.
+                direction = "canopy"
             # The model also repaints a band (~5°) of known pixels around the
             # hole, and that band is blended back with a weight falling from
             # 1 at the hole to 0 at its outer edge, so new content fades into
@@ -436,7 +446,8 @@ def complete_panorama(
             ramp = np.clip(1.0 - distance / np.where(photo_view, band / 2.0, band), 0.0, 1.0)
             soft = (ramp * ramp * (3.0 - 2.0 * ramp)).astype(np.float32)
             merged = (image * (1.0 - soft[..., None]) + generated * soft[..., None]).astype(np.uint8)
-            blend_view(panorama, known, protected, merged, soft, view)
+            top = HORIZON_TOP if direction == "around" and not scene.enclosed else None
+            blend_view(panorama, known, protected, merged, soft, view, top_deg=top)
             done.append(view)
             logger.debug("view yaw %+.0f pitch %+.0f: %.0f%% generated", view.yaw_deg, view.pitch_deg, 100 * hole.mean())
         if progress:
@@ -445,6 +456,25 @@ def complete_panorama(
         # View borders the ring never revisited: a few thin slivers at most.
         panorama[:] = propagate_background(panorama, ~known, known)
     return Completion(panorama, ~original, done, time.perf_counter() - started)
+
+
+#: An upward view whose known pixels are at least this textured (foliage,
+#: branches, rock, buildings) is painted as a canopy, not as open sky.
+CANOPY_FRACTION = 0.2
+TEXTURE_STD = 8.0
+
+
+def textured_fraction(image: np.ndarray, known: np.ndarray) -> float:
+    """Share of the ``known`` pixels of a view with fine texture (local grey
+    standard deviation over ``TEXTURE_STD``): foliage, branches, rock and
+    buildings are textured, sky and cloud are smooth."""
+    if known.sum() < 100:
+        return 0.0
+    grey = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    size = (9, 9)
+    mean = cv2.blur(grey, size)
+    std = np.sqrt(np.maximum(cv2.blur(grey * grey, size) - mean * mean, 0.0))
+    return float((std[known] > TEXTURE_STD).mean())
 
 
 def match_colours(generated: np.ndarray, reference: np.ndarray, region: np.ndarray) -> np.ndarray:

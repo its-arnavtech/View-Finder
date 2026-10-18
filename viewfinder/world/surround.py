@@ -38,7 +38,7 @@ from .scene import GENERIC, Scene
 logger = logging.getLogger(__name__)
 
 #: Bump when generation changes enough that cached panoramas are stale.
-GENERATION_VERSION = "7"
+GENERATION_VERSION = "9"
 
 #: Generation canvas. Views are a quarter of its width: 1024 px (SDXL's
 #: native size) at 100° give ~10 px/degree, which a 4096-wide

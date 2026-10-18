@@ -314,6 +314,7 @@ def blend_view(
     alpha: np.ndarray,
     view: View,
     margin: float = 0.04,
+    top_deg: float | None = None,
 ) -> np.ndarray:
     """Write a generated ``image`` (seen through ``view``) into ``panorama``
     in place, and return the newly filled mask.
@@ -324,6 +325,7 @@ def blend_view(
       so the band the model repainted fades into what was there.
     * The border ``margin`` fills nothing new: models are least reliable at
       their edges, and the next view overlaps there anyway.
+    * Nor does anything above ``top_deg`` of elevation, when given.
     """
     height, width = panorama.shape[:2]
     directions = equirect_directions(width, height)
@@ -331,10 +333,14 @@ def blend_view(
     edge = max(1.0, margin * view.size)
     distance_to_border = np.minimum(np.minimum(i, j), np.minimum(view.size - 1 - i, view.size - 1 - j))
     fill = inside & (distance_to_border >= edge) & ~known
+    if top_deg is not None:
+        fill &= directions[..., 1] <= np.sin(np.radians(top_deg))
     blend = inside & known & ~protected
     if not (fill.any() or blend.any()):
         return fill
-    sampled = cv2.remap(image, i, j, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
+    # Bicubic: each view is resampled once into the panorama and again on
+    # screen, and bilinear softened both times.
+    sampled = cv2.remap(image, i, j, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
     weight = cv2.remap(alpha.astype(np.float32), i, j, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
     taper = np.clip(distance_to_border / edge, 0.0, 1.0)
     weight = (weight * taper * taper * (3 - 2 * taper))[blend][:, None]

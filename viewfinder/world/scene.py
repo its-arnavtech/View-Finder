@@ -206,7 +206,18 @@ class Scene:
 
     def prompt(self, direction: str = "around") -> str:
         """Prompt for one generated view. ``direction`` is ``around`` (the
-        horizon), ``up`` or ``down``."""
+        horizon), ``up``, ``canopy`` (looking up where trees or other things
+        already rise into the view) or ``down``."""
+        if direction == "canopy" and self.enclosed:
+            direction = "up"  # indoors, up is the ceiling
+        if direction == "canopy":
+            framing = (
+                "through the treetops at the sky above", "branches against the sky"
+            ) if self.setting == "nature" else ("past the rooftops at the sky above", "buildings against the sky")
+            return (
+                f"looking up {framing[0]} {self.subject} {self.conditions}, {framing[1]}, "
+                "photograph, empty, no people, sharp focus, highly detailed"
+            )
         if direction == "up":
             if self.enclosed:
                 return f"looking up at the ceiling of {self.subject} {self.conditions}, photograph, empty, no people, detailed"
@@ -234,6 +245,9 @@ class Scene:
             negative += ", haze, fog, mist, smoke, washed out, low contrast"
         if direction == "up" and not self.enclosed:
             negative += ", trees, branches, leaves, mountains, cliff, rocks, ground, land, water, buildings"
+        if direction == "canopy" and not self.enclosed:
+            # Trees may close overhead; land may not.
+            negative += ", mountains, cliff, rocks, ground, land, water, upside down"
         return negative
 
     def as_dict(self) -> dict[str, object]:

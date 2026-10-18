@@ -150,9 +150,13 @@ def test_queue_is_bounded(tmp_path):
 
     runner = JobRunner(SceneEstimator(), WorldStore(tmp_path), max_pending=2, builder=slow_builder)
     runner.submit(b"x", "mobile")
-    runner.submit(b"y", "mobile")
+    second = runner.submit(b"y", "mobile")
     with pytest.raises(QueueFull):
         runner.submit(b"z", "mobile")
+    deadline = time.time() + 5
+    while runner.status(second.id).get("position") != 1 and time.time() < deadline:
+        time.sleep(0.01)  # the first is picked up and starts building
+    assert runner.status(second.id)["position"] == 1  # the build ahead counts
     gate.set()
     runner.stop()
 

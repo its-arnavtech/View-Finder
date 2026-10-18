@@ -254,6 +254,7 @@ class WorldRenderer:
         texture = self._ctx.texture((image.shape[1], image.shape[0]), 3, np.flipud(image).tobytes())
         texture.build_mipmaps()
         texture.filter = (self._gl.LINEAR_MIPMAP_LINEAR, self._gl.LINEAR)
+        texture.anisotropy = 8.0  # as the viewer: sharp where the texture is squeezed
         texture.repeat_x = False
         texture.repeat_y = False
         return texture

@@ -209,8 +209,12 @@ class JobRunner:
             job = self._jobs.get(job_id)
             if job is None:
                 return None
+            # Jobs ahead, the one being built included: "waiting for the
+            # engine" with nothing ahead in the list looked like a hang while
+            # another photo was building.
             queued = [j for j in self._order if self._jobs[j].status == "queued"]
-            position = queued.index(job_id) if job_id in queued else 0
+            running = sum(1 for j in self._jobs.values() if j.status == "running")
+            position = running + queued.index(job_id) if job_id in queued else 0
             return job.as_dict(position)
 
     def pending(self) -> int:

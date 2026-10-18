@@ -123,6 +123,11 @@
     if (!gl) throw new Error("This browser cannot show 3D (WebGL is unavailable or disabled).");
     this.gl = gl;
     this.uint32 = this.webgl2 || !!gl.getExtension("OES_element_index_uint");
+    // The panorama's texture is squeezed sideways toward the zenith; plain
+    // mipmapping then picks a level by the squeezed axis and blurs the other
+    // (treetops overhead came out soft). Anisotropic filtering samples along it.
+    this.anisotropic = gl.getExtension("EXT_texture_filter_anisotropic") ||
+      gl.getExtension("WEBKIT_EXT_texture_filter_anisotropic") || gl.getExtension("MOZ_EXT_texture_filter_anisotropic");
     this.program = this._program(VERTEX, FRAGMENT);
     var p = this.program;
     this.loc = {
@@ -187,6 +192,10 @@
     if (this.webgl2 || pot) {
       gl.generateMipmap(gl.TEXTURE_2D);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      if (this.anisotropic) {
+        var most = gl.getParameter(this.anisotropic.MAX_TEXTURE_MAX_ANISOTROPY_EXT);
+        gl.texParameterf(gl.TEXTURE_2D, this.anisotropic.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, most));
+      }
     } else {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); // WebGL1 cannot mip NPOT
     }
