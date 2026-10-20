@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>Set up View Finder</title>
+<link rel="stylesheet" href="setup.css">
+</head>
+<body>
+<main>
+  <h1>Set up the engine</h1>
+  <p class="lede">View Finder builds worlds on this computer, on your NVIDIA GPU. The first time, it installs its engine:
+    PyTorch for NVIDIA GPUs and the image models, about 13 GB in all. This needs an internet connection and
+    Python 3.11–3.13, and takes a while.</p>
+  <button id="start" type="button">Set up</button>
+  <p id="status" role="status"></p>
+  <pre id="log" hidden></pre>
+</main>
+<script src="setup.js"></script>
+</body>
+</html>

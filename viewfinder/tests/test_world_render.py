@@ -115,28 +115,41 @@ def test_a_sheet_stretched_diagonally_reads_as_smeared():
     r.release()
 
 
-@pytest.mark.parametrize(
-    "choice, expected",
-    [(None, "0x800000001"), ("discrete", "0x800000001"), ("integrated", "0x800000000"), ("system", None)],
-)
-def test_render_gpu_choice(monkeypatch, choice, expected):
+def test_render_asks_windows_for_the_nvidia_gpu(monkeypatch):
     from viewfinder.world import render
 
     monkeypatch.setattr(render.sys, "platform", "win32")
-    monkeypatch.delenv("SHIM_MCCOMPAT", raising=False)
-    if choice is None:
-        monkeypatch.delenv(render.RENDER_GPU_ENV, raising=False)
-    else:
-        monkeypatch.setenv(render.RENDER_GPU_ENV, choice)
-    render._prefer_gpu()
-    assert render.os.environ.get("SHIM_MCCOMPAT") == expected
-
-
-def test_render_gpu_leaves_a_users_own_setting(monkeypatch):
-    from viewfinder.world import render
-
-    monkeypatch.setattr(render.sys, "platform", "win32")
+    # Even over an earlier request for the integrated GPU: it is never used.
     monkeypatch.setenv("SHIM_MCCOMPAT", "0x800000000")
-    monkeypatch.setenv(render.RENDER_GPU_ENV, "discrete")
     render._prefer_gpu()
-    assert render.os.environ["SHIM_MCCOMPAT"] == "0x800000000"
+    assert render.os.environ["SHIM_MCCOMPAT"] == "0x800000001"
+
+
+@pytest.mark.parametrize("policy, offload", [("nvidia", "1"), (None, None)])
+def test_render_prime_offload_on_linux_only_when_nvidia_is_required(monkeypatch, policy, offload):
+    from viewfinder.world import render
+
+    monkeypatch.setattr(render.sys, "platform", "linux")
+    monkeypatch.delenv("__NV_PRIME_RENDER_OFFLOAD", raising=False)
+    monkeypatch.delenv("__GLX_VENDOR_LIBRARY_NAME", raising=False)
+    if policy is None:
+        monkeypatch.delenv(render.GPU_ENV, raising=False)
+    else:
+        monkeypatch.setenv(render.GPU_ENV, policy)
+    render._prefer_gpu()
+    assert render.os.environ.get("__NV_PRIME_RENDER_OFFLOAD") == offload
+
+
+def test_render_refuses_another_gpu_when_nvidia_is_required(monkeypatch):
+    from viewfinder.world import render
+
+    try:
+        WorldRenderer().release()
+    except RendererUnavailable as exc:
+        pytest.skip(f"no OpenGL: {exc}")
+    if "nvidia" in WorldRenderer().gpu.lower():
+        pytest.skip("this machine renders on NVIDIA")
+    monkeypatch.setattr(render.sys, "platform", "darwin")  # no environment changes
+    monkeypatch.setenv(render.GPU_ENV, "nvidia")
+    with pytest.raises(render.WrongGPU, match="not the NVIDIA GPU"):
+        WorldRenderer()

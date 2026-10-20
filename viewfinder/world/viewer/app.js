@@ -1,6 +1,8 @@
 /* World Engine viewer app: upload → job polling → render loop → toolbar.
- * Runs in two modes:
+ * Runs in three modes:
  *   server:     served by `view-finder world serve`, uploads photos over the API.
+ *   desktop:    inside the desktop app (desktop/), which exposes the engine as
+ *               window.viewfinderDesktop; no network at all.
  *   standalone: a single exported HTML with the GLB inlined as base64
  *               (window.__VIEWFINDER_WORLD__); no network at all. */
 (function (root) {
@@ -30,6 +32,8 @@
 
   var state = {
     standalone: typeof root.__VIEWFINDER_WORLD__ === "string",
+    desktop: typeof root.__VIEWFINDER_WORLD__ !== "string" && root.viewfinderDesktop ? root.viewfinderDesktop : null,
+    engineReady: false,
     token: null,
     worldId: null,
     glbBytes: null,
@@ -53,6 +57,7 @@
   function storeSet(key, value) { try { root.localStorage.setItem(key, value); } catch (e) { /* ignore */ } }
 
   function isMobile() {
+    if (state.desktop) return false;
     var coarse = root.matchMedia && root.matchMedia("(pointer: coarse)").matches;
     var small = Math.min(root.screen.width, root.screen.height) < 768;
     // navigator.deviceMemory is secure-context only; undefined means "unknown" (PDD-REVIEW R3).
@@ -125,8 +130,28 @@
 
   function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
 
+  /* The three engine calls, over HTTP (server) or the desktop app's bridge. */
+  function submitPhoto(blob, quality, name) {
+    if (state.desktop) {
+      return blob.arrayBuffer().then(function (bytes) { return state.desktop.build(bytes, quality, name); });
+    }
+    return api("api/worlds?quality=" + encodeURIComponent(quality), {
+      method: "POST",
+      headers: { "Content-Type": blob.type || "application/octet-stream" },
+      body: blob,
+    }).then(function (r) { return r.json(); });
+  }
+  function jobStatus(jobId) {
+    if (state.desktop) return state.desktop.job(jobId);
+    return api("api/jobs/" + jobId).then(function (r) { return r.json(); });
+  }
+  function worldBytes(worldId) {
+    if (state.desktop) return state.desktop.world(worldId);
+    return api("api/worlds/" + worldId + "/world.glb").then(function (r) { return r.arrayBuffer(); });
+  }
+
   function pollJob(jobId) {
-    return api("api/jobs/" + jobId).then(function (r) { return r.json(); }).then(function (job) {
+    return jobStatus(jobId).then(function (job) {
       if (job.status === "error") throw new Error(job.error || "The world could not be built.");
       if (job.status === "done") return job.world_id;
       var label = STAGE_LABELS[job.stage || job.status] || "Working…";
@@ -136,20 +161,15 @@
     });
   }
 
-  function uploadFile(file) {
+  function uploadFile(file, name) {
     showError("");
     setBusy("Preparing photo…", 0.02);
     var quality = $("quality").value === "auto" ? (isMobile() ? "mobile" : "desktop") : $("quality").value;
     return prepareUpload(file, quality)
       .then(function (blob) {
-        setBusy("Uploading…", 0.06);
-        return api("api/worlds?quality=" + encodeURIComponent(quality), {
-          method: "POST",
-          headers: { "Content-Type": blob.type || "application/octet-stream" },
-          body: blob,
-        });
+        setBusy(state.desktop ? "Sending the photo to the engine…" : "Uploading…", 0.06);
+        return submitPhoto(blob, quality, name || file.name);
       })
-      .then(function (r) { return r.json(); })
       .then(function (job) { return pollJob(job.job_id); })
       .then(openWorld)
       .catch(function (error) { showError(error.message); });
@@ -157,8 +177,7 @@
 
   function openWorld(worldId) {
     setBusy(STAGE_LABELS.done, 0.92);
-    return api("api/worlds/" + worldId + "/world.glb")
-      .then(function (r) { return r.arrayBuffer(); })
+    return worldBytes(worldId)
       .then(function (bytes) {
         state.worldId = worldId;
         try {
@@ -300,6 +319,7 @@
     if (!state.renderer) {
       state.renderer = new root.WorldRenderer(canvas, {
         maxPixelRatio: state.pixelRatioCeiling = isMobile() ? 1.5 : 2,
+        powerPreference: state.desktop ? "high-performance" : "default",
         onLost: function () { setBusy("Restoring the view…", 0.5); },
         onRestored: function () { show("viewer"); invalidate(); },
       });
@@ -324,6 +344,90 @@
     });
   }
 
+  /* ---------------- desktop app: engine status and recent worlds ---------------- */
+  function describeEngine(status) {
+    var gpu = status.gpu || {};
+    var parts = [];
+    if (gpu.cuda) parts.push("Engine on " + gpu.cuda);
+    if (status.viewer && status.viewer.known) parts.push("3D view on " + status.viewer.gpu);
+    var surround = status.engine && status.engine.surround;
+    parts.push(surround ? "generated 360° worlds" : "3D photos (no generator installed)");
+    return parts.join(" · ");
+  }
+
+  /* Which GPU WebGL really runs on, for the app's NVIDIA-only check. */
+  function reportViewerGpu() {
+    try {
+      var canvas = doc.createElement("canvas");
+      var gl = canvas.getContext("webgl2", { powerPreference: "high-performance" }) ||
+        canvas.getContext("webgl", { powerPreference: "high-performance" });
+      if (!gl) return Promise.resolve();
+      var debug = gl.getExtension("WEBGL_debug_renderer_info");
+      var renderer = debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+      var lose = gl.getExtension("WEBGL_lose_context");
+      if (lose) lose.loseContext();
+      return state.desktop.reportGpu(String(renderer)).catch(function () {});
+    } catch (e) {
+      return Promise.resolve();
+    }
+  }
+
+  function watchEngine() {
+    var line = $("engine");
+    line.hidden = false;
+    return state.desktop.status().then(function (status) {
+      var problems = (status.viewer && status.viewer.problems) || [];
+      if (status.state === "loading") {
+        line.textContent = "Starting the engine (loading models)…";
+        return sleep(1000).then(watchEngine);
+      }
+      if (status.state === "failed") {
+        line.textContent = "";
+        showError("The engine could not start: " + (status.error || "unknown error") +
+          " (File > Restart Engine tries again; File > Show Engine Log has the details.)");
+        $("photo").disabled = true;
+        return;
+      }
+      state.engineReady = true;
+      $("photo").disabled = false;
+      $("photo-label").classList.remove("disabled");
+      line.textContent = describeEngine(status);
+      if (problems.length) showError(problems.join(" "));
+    }).catch(function (error) {
+      line.textContent = "";
+      showError(error.message);
+    });
+  }
+
+  function listRecent() {
+    if (!state.desktop) return;
+    state.desktop.worlds().then(function (worlds) {
+      var list = $("recent-list");
+      list.textContent = "";
+      worlds.slice(0, 8).forEach(function (world) {
+        var item = doc.createElement("li");
+        var button = doc.createElement("button");
+        button.type = "button";
+        button.textContent = world.name || "World";
+        var when = doc.createElement("span");
+        when.textContent = new Date(world.created).toLocaleString();
+        button.appendChild(when);
+        button.addEventListener("click", function () {
+          openWorld(world.id).catch(function (e) { showError(e.message); });
+        });
+        item.appendChild(button);
+        list.appendChild(item);
+      });
+      $("recent").hidden = worlds.length === 0;
+    }).catch(function () { $("recent").hidden = true; });
+  }
+
+  function goHome() {
+    try { root.history.replaceState(null, "", "./"); } catch (e) { /* ignore */ }
+    show("home");
+    listRecent();
+  }
+
   /* ---------------- toolbar ---------------- */
   function updateToolbar() {
     var c = state.controls;
@@ -331,7 +435,7 @@
     $("btn-mode").textContent = c.mode === "look" ? "Orbit" : "Look";
     $("btn-mode").setAttribute("aria-label", c.mode === "look" ? "Switch to orbit mode" : "Switch to look-around mode");
     $("btn-roam").setAttribute("aria-pressed", c.freeRoam);
-    $("btn-tilt").hidden = !root.WorldControls.tiltSupported();
+    $("btn-tilt").hidden = !!state.desktop || !root.WorldControls.tiltSupported();
     $("btn-new").hidden = state.standalone;
   }
 
@@ -353,9 +457,15 @@
       event.target.value = ""; // allow picking the same file again
       if (file) uploadFile(file);
     });
-    $("btn-new").addEventListener("click", function () {
-      try { root.history.replaceState(null, "", "./"); } catch (e) { /* ignore */ }
-      show("home");
+    $("btn-new").addEventListener("click", goHome);
+    // Drop a photo anywhere on the window.
+    doc.addEventListener("dragover", function (event) { event.preventDefault(); });
+    doc.addEventListener("drop", function (event) {
+      event.preventDefault();
+      var file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+      if (!file || state.standalone || !$("busy").hidden || (state.desktop && !state.engineReady)) return;
+      if (file.type && file.type.indexOf("image/") !== 0) { showError("That file isn't an image."); return; }
+      uploadFile(file);
     });
     $("btn-reset").addEventListener("click", function () { state.controls.reset(); });
     $("btn-mode").addEventListener("click", function () {
@@ -391,6 +501,22 @@
     if (state.standalone) {
       setBusy("Opening world…", 0.5);
       showWorld(base64ToBuffer(root.__VIEWFINDER_WORLD__)).catch(function (e) { showError(e.message); });
+      return;
+    }
+    if (state.desktop) {
+      $("quality-auto").textContent = "Auto (desktop)";
+      $("photo-label").firstElementChild.textContent = "Choose a photo";
+      doc.querySelector("#home .lede").textContent =
+        "Choose a photo, or drop one here. The engine on this computer estimates its depth and builds a 3D world you can move through.";
+      $("photo").disabled = true;
+      $("photo-label").classList.add("disabled");
+      $("privacy").textContent = "Your photo is processed on this computer and never leaves it.";
+      // File > Open Photo… in the app's menu.
+      state.desktop.onOpenPhoto(function (bytes, name) {
+        if (state.engineReady && $("busy").hidden) uploadFile(new Blob([bytes]), name);
+      });
+      goHome();
+      reportViewerGpu().then(watchEngine);
       return;
     }
     // Token: taken once from the printed link, then remembered and removed

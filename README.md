@@ -578,6 +578,14 @@ view-finder world build photo.jpg --html         # photo_world.glb/.json/.html
 view-finder world serve --host 0.0.0.0           # open the printed link on your phone
 ```
 
+There is also a **desktop app** ([desktop/README.md](desktop/README.md)): the
+same engine in its own window, with no network port, running only on the
+NVIDIA GPU:
+
+```bash
+cd desktop && npm install && npm start
+```
+
 The phone path resizes photos on the device before upload and protects the
 LAN server with an access token. Everything stays on your network. See
 [docs/3d-engine/README.md](docs/3d-engine/README.md) for usage and

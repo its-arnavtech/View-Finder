@@ -113,6 +113,10 @@ finetune/throughput.json
 /*.bmp
 /*.webp
 
+# === Desktop app (desktop/) build outputs ===
+desktop/node_modules/
+desktop/dist/
+
 # === Scratch / temp ===
 scratchpad/
 tmp/

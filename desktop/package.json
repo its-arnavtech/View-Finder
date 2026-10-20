@@ -1,0 +1,21 @@
+{
+  "name": "view-finder-desktop",
+  "productName": "View Finder",
+  "version": "0.2.0",
+  "description": "View Finder's World Engine as a desktop app: step into a photo.",
+  "author": "View Finder contributors",
+  "repository": "github:its-arnavtech/View-Finder",
+  "private": true,
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test \"test/*.test.js\"",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "44.5.1",
+    "electron-builder": "26.17.0"
+  }
+}
