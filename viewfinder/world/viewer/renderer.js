@@ -97,6 +97,8 @@
     this.maxPixelRatio = options.maxPixelRatio || 2;
     this.onLost = options.onLost || function () {};
     this.onRestored = options.onRestored || function () {};
+    // "high-performance" asks a two-GPU laptop for its discrete GPU (the desktop app).
+    this.powerPreference = options.powerPreference || "default";
     this.scene = null;
     this.gpu = null;
     this.lost = false;
@@ -116,7 +118,7 @@
   }
 
   Renderer.prototype._initContext = function () {
-    var attributes = { antialias: true, alpha: false, powerPreference: "default", preserveDrawingBuffer: false };
+    var attributes = { antialias: true, alpha: false, powerPreference: this.powerPreference, preserveDrawingBuffer: false };
     var gl = FORCE_WEBGL1 ? null : this.canvas.getContext("webgl2", attributes);
     this.webgl2 = !!gl;
     if (!gl) gl = this.canvas.getContext("webgl", attributes) || this.canvas.getContext("experimental-webgl", attributes);

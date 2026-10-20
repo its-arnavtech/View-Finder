@@ -38,6 +38,7 @@ from .export import VIEWER_ASSETS, viewer_asset
 from .ingest import ImageInputError
 from .pipeline import build_world
 from .profiles import PROFILES
+from .render import WrongGPU
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,7 @@ class Job:
     progress: float = 0.0
     world_id: str | None = None
     error: str | None = None
+    name: str | None = None  # what to call the world; the upload's bytes carry no file name
     created: float = field(default_factory=time.time)
 
     def as_dict(self, position: int) -> dict[str, Any]:
@@ -192,12 +194,12 @@ class JobRunner:
         self._thread = threading.Thread(target=self._work, name="world-builder", daemon=True)
         self._thread.start()
 
-    def submit(self, payload: bytes, quality: str) -> Job:
+    def submit(self, payload: bytes, quality: str, name: str | None = None) -> Job:
         with self._lock:
             pending = sum(1 for j in self._jobs.values() if j.status in ("queued", "running"))
             if pending >= self.max_pending:
                 raise QueueFull(f"{pending} photos are already waiting")
-            job = Job(id=uuid.uuid4().hex, quality=quality, payload=payload)
+            job = Job(id=uuid.uuid4().hex, quality=quality, payload=payload, name=name)
             self._jobs[job.id] = job
             self._order.append(job.id)
             self._forget_old()
@@ -254,12 +256,13 @@ class JobRunner:
                     classify=self.classify,
                     progress=progress,
                     **({"surround_cache": self.surround_cache} if self.surround_cache else {}),
+                    **({"name": job.name} if job.name else {}),
                 )
                 world_id = uuid.uuid4().hex
                 self.store.save(world_id, result.glb, result.manifest)
                 job.world_id, job.status, job.progress = world_id, "done", 1.0
                 logger.info("Job %s -> world %s (%.1f MB)", job.id[:8], world_id[:8], len(result.glb) / 1e6)
-            except ImageInputError as exc:
+            except (ImageInputError, WrongGPU) as exc:
                 job.status, job.error = "error", str(exc)
             except Exception as exc:  # never let one photo kill the worker
                 logger.exception("World build failed")

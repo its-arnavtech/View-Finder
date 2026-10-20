@@ -28,6 +28,9 @@ How a world is made:
    coherent surface made for that spot.
 6. A standard `.glb` with a dependency-free WebGL viewer.
 
+It runs as a desktop app ([desktop/README.md](../../desktop/README.md)), or
+as a server you open in a browser, including on a phone (below).
+
 Like the rest of View Finder it runs locally. Photos never leave your
 computer, and the models are downloaded once, explicitly. The engine's guess
 at where a photo was taken (region and confidence, coordinates to ~10 km) is
@@ -69,9 +72,10 @@ crawl instead of failing.
 
 **Laptops with two GPUs:** everything runs on the NVIDIA card, including the
 offscreen renderer that looks at the world while it is built (it fits
-alongside the generator, ~7.1 of 8 GB). `VIEWFINDER_RENDER_GPU=integrated`
-moves the renderer to the integrated GPU instead; that GPU also draws the
-desktop, which then stutters while a world builds.
+alongside the generator, ~7.1 of 8 GB). The integrated GPU, which draws the
+desktop, is never used. `VIEWFINDER_GPU=nvidia` (the desktop app's default)
+makes that a requirement: a stage that would land on any other GPU fails
+with a message instead of running there.
 
 ## On your phone
 

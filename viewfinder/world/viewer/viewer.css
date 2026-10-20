@@ -104,6 +104,22 @@ select {
   font: inherit;
 }
 .error { margin: 16px 0 0; color: var(--error); font-weight: 500; }
+.primary.disabled { opacity: 0.5; cursor: progress; }
+.primary input:disabled { cursor: progress; }
+
+/* Desktop app: worlds built earlier, reopened from disk. */
+#recent { margin-top: 22px; text-align: left; }
+#recent[hidden] { display: none; }
+#recent h2 { margin: 0 0 8px; font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+#recent-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+#recent-list button {
+  width: 100%; min-height: 44px; padding: 8px 12px;
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+#recent-list button:hover { border-color: var(--accent); }
+#recent-list button span { color: var(--muted); font-size: 0.82rem; white-space: nowrap; }
 
 .spinner {
   width: 44px; height: 44px; margin: 4px auto 16px;

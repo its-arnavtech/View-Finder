@@ -75,6 +75,21 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--tls-key", type=Path, default=None, help="PEM private key for --tls-cert")
     depth_options(serve)
 
+    desktop = commands.add_parser(
+        "desktop", help="run the engine for the desktop app (JSON lines on stdin/stdout; no network port)"
+    )
+    desktop.add_argument("--store", type=Path, required=True, help="where worlds are kept")
+    desktop.add_argument("--max-worlds", type=int, default=30, help="keep only the newest N worlds")
+    desktop.add_argument("--max-upload-mb", type=int, default=25)
+    desktop.add_argument(
+        "--gpu",
+        choices=("nvidia", "any"),
+        default="nvidia",
+        help="nvidia: every GPU stage runs on the NVIDIA card or the engine refuses to start; "
+        "any: the system's choice (default: %(default)s)",
+    )
+    depth_options(desktop)
+
     setup = commands.add_parser(
         "setup",
         help="download the models once: depth (~100 MB), LaMa (~93 MB), scene CLIP (~1.7 GB), "
@@ -262,6 +277,27 @@ def _serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _desktop(args: argparse.Namespace) -> int:
+    import faulthandler
+
+    from .desktop import DesktopConfig, run
+
+    faulthandler.enable()
+    if args.gpu == "nvidia" and args.device == "auto":
+        args.device = "cuda"  # depth on the NVIDIA card, never a fallback
+
+    def load():
+        estimator = _load(args)
+        inpainter = _load_inpainter(args)
+        generator, classify = _load_generator(args)
+        return estimator, inpainter, generator, classify
+
+    config = DesktopConfig(
+        store=args.store, max_worlds=args.max_worlds, max_upload_mb=args.max_upload_mb, gpu=args.gpu
+    )
+    return run(config, load)
+
+
 def _setup(args: argparse.Namespace) -> int:
     from . import inpaint
     from .depth import download_model, model_cached
@@ -316,7 +352,7 @@ def _setup(args: argparse.Namespace) -> int:
 def run(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     _configure_logging(getattr(args, "verbose", False))
-    return {"build": _build, "serve": _serve, "setup": _setup}[args.command](args)
+    return {"build": _build, "serve": _serve, "desktop": _desktop, "setup": _setup}[args.command](args)
 
 
 def main() -> None:

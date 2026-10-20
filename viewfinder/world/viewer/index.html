@@ -15,7 +15,7 @@
 <section id="home" class="panel" hidden>
   <h1>Step into a photo</h1>
   <p class="lede">Pick or take a photo. The engine on your computer estimates its depth and builds a 3D world you can move through.</p>
-  <label class="primary" for="photo">
+  <label id="photo-label" class="primary" for="photo">
     <span>Take or choose a photo</span>
     <input id="photo" type="file" accept="image/*">
   </label>
@@ -28,7 +28,12 @@
     </select>
   </label>
   <p id="error" class="error" role="alert" hidden></p>
-  <p class="fine">Your photo is processed on your own computer and never leaves your network.</p>
+  <p id="engine" class="fine" hidden></p>
+  <div id="recent" hidden>
+    <h2>Recent worlds</h2>
+    <ul id="recent-list"></ul>
+  </div>
+  <p id="privacy" class="fine">Your photo is processed on your own computer and never leaves your network.</p>
 </section>
 
 <section id="busy" class="panel" hidden aria-live="polite">

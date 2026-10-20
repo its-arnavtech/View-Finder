@@ -23,11 +23,11 @@ nearest station's meshes are drawn (``station_fade``), so wherever you stand
 you see one coherent world made for that spot, never a mosaic of surfaces
 made for different places fighting over depth.
 
-On a laptop with two GPUs (NVIDIA Optimus) the renderer asks for the one
-named in ``VIEWFINDER_RENDER_GPU``: ``discrete`` (the default, the NVIDIA
-card that also runs the generator) or ``integrated`` (leaves the NVIDIA
-card's memory to the generator, but loads the integrated GPU, which the
-desktop also draws on). Anything else leaves the choice to the system.
+On a laptop with two GPUs (NVIDIA Optimus) the renderer always asks for the
+NVIDIA card, which also runs the generator; the integrated GPU draws the
+desktop and is never used. With ``VIEWFINDER_GPU=nvidia`` (the desktop app
+sets it) a context that still lands anywhere else is refused (``WrongGPU``)
+instead of quietly rendering there.
 """
 
 from __future__ import annotations
@@ -46,18 +46,26 @@ logger = logging.getLogger(__name__)
 SURFACE, BACKDROP, DOME = 0, 1, 2
 HOLE, SKY, SOLID = 0, 1, 2
 
-RENDER_GPU_ENV = "VIEWFINDER_RENDER_GPU"
-# NVIDIA Optimus reads this per process when OpenGL loads.
-_OPTIMUS = {"discrete": "0x800000001", "integrated": "0x800000000"}
+GPU_ENV = "VIEWFINDER_GPU"
+# NVIDIA Optimus reads this per process when OpenGL loads: the discrete GPU.
+_OPTIMUS_DISCRETE = "0x800000001"
+
+
+def nvidia_only() -> bool:
+    """``VIEWFINDER_GPU=nvidia``: every GPU stage must run on the NVIDIA card."""
+    return os.environ.get(GPU_ENV, "").strip().lower() == "nvidia"
 
 
 def _prefer_gpu() -> None:
-    """Point this process's OpenGL at the GPU ``VIEWFINDER_RENDER_GPU`` names
-    (default discrete). Only before the first context: the driver keeps the
-    GPU it loaded on. A ``SHIM_MCCOMPAT`` set by the user wins."""
-    choice = os.environ.get(RENDER_GPU_ENV, "discrete").strip().lower()
-    if sys.platform == "win32" and choice in _OPTIMUS:
-        os.environ.setdefault("SHIM_MCCOMPAT", _OPTIMUS[choice])
+    """Point this process's OpenGL at the NVIDIA GPU. Only before the first
+    context: the driver keeps the GPU it loaded on."""
+    if sys.platform == "win32":
+        os.environ["SHIM_MCCOMPAT"] = _OPTIMUS_DISCRETE
+    elif sys.platform.startswith("linux") and nvidia_only():
+        # PRIME render offload; on a machine without the NVIDIA driver these
+        # break OpenGL, so only when NVIDIA was asked for.
+        os.environ.setdefault("__NV_PRIME_RENDER_OFFLOAD", "1")
+        os.environ.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
 
 _VERTEX = """
 #version 330
@@ -152,6 +160,10 @@ class RendererUnavailable(RuntimeError):
     """No OpenGL 3.3 context could be created (e.g. a headless server)."""
 
 
+class WrongGPU(RuntimeError):
+    """``VIEWFINDER_GPU=nvidia``, but OpenGL came up on another GPU."""
+
+
 @dataclass
 class Camera:
     """A perspective camera in world coordinates (glTF: +Y up)."""
@@ -239,6 +251,13 @@ class WorldRenderer:
         except Exception as exc:  # no GL driver / headless
             raise RendererUnavailable(f"no OpenGL 3.3 context: {exc}") from exc
         self.gpu = str(self._ctx.info.get("GL_RENDERER", "unknown"))
+        vendor = str(self._ctx.info.get("GL_VENDOR", ""))
+        if nvidia_only() and "nvidia" not in f"{vendor} {self.gpu}".lower():
+            self._ctx.release()
+            raise WrongGPU(
+                f"The offscreen renderer came up on {self.gpu}, not the NVIDIA GPU. On Windows, set "
+                "Settings > System > Display > Graphics > Python to High performance."
+            )
         logger.info("rendering on %s", self.gpu)
         self._gl = moderngl
         self._program = self._ctx.program(vertex_shader=_VERTEX, fragment_shader=_FRAGMENT)

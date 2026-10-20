@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -195,6 +195,7 @@ def build_world(
     classify: "Callable[[np.ndarray], Scene] | None" = None,
     progress: Progress | None = None,
     surround_cache: "Path | None" = None,
+    name: str | None = None,
 ) -> WorldResult:
     """Build an explorable layered 3D world from one photo.
 
@@ -205,6 +206,8 @@ def build_world(
 
     ``inpainter`` (LaMa, see inpaint.py) fills what foreground objects hide,
     and outpaints the frame border when there is no generated surround.
+    ``name`` names the world (default: the photo's file name, or "upload"
+    for raw bytes).
     """
     profile = get_profile(profile)
     estimator = estimator or load_estimator()
@@ -223,6 +226,8 @@ def build_world(
     report("start", 0.0)
     # -- 1. ingest -------------------------------------------------------
     photo = load_source(source, profile.working_long_side)
+    if name:
+        photo = replace(photo, name=name)
     height, width = photo.rgb.shape[:2]
     intrinsics = intrinsics_for(width, height, photo.focal_35mm)
     mark("ingest")

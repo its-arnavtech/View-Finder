@@ -423,6 +423,18 @@ extra dependency, and multipart parsing (`cgi`) no longer exists on Python
   it. IDs are validated as UUID hex before any path is built. Upload size is
   capped.
 
+### 6.1 Desktop app
+
+The desktop app (`desktop/`, see its README) runs the same `JobRunner` and
+`WorldStore` without HTTP: `view-finder world desktop --store DIR` reads
+JSON requests on stdin and answers on stdout (`status`, `build`, `job`), and
+ends when stdin closes. No port is opened. The Electron shell reads finished
+worlds straight from the store and serves the viewer from disk; the viewer's
+`app.js` uses the shell's `window.viewfinderDesktop` bridge in place of the
+API. Under `--gpu nvidia` (the app's default) the engine refuses to start
+unless PyTorch sees a CUDA device and its offscreen OpenGL renderer is
+NVIDIA's (`VIEWFINDER_GPU=nvidia`, `render.WrongGPU`).
+
 ## 7. CLI
 
 ```
@@ -430,6 +442,7 @@ view-finder world build PHOTO [--quality mobile|desktop|high] [--out DIR]
                               [--html] [--depth-model depth-anything-v2-small|heuristic]
                               [--device auto|cpu|cuda]
 view-finder world serve [--host 127.0.0.1] [--port 8765] [--store DIR] [...]
+view-finder world desktop --store DIR [--gpu nvidia|any] [...]   # for the desktop app
 view-finder world setup         # one-time explicit download of the depth model
 ```
 
@@ -454,7 +467,8 @@ viewfinder/world/
   export.py          WorldResult → files, standalone HTML
   pipeline.py        orchestration, stage timings, progress callback
   server.py          HTTP API, job queue, store, token
-  cli.py             build / serve / setup
+  desktop.py         the desktop app's engine process: JSON lines on stdio
+  cli.py             build / serve / desktop / setup
   viewer/            index.html, viewer.css, glb.js, renderer.js, controls.js, app.js
 viewfinder/tests/test_world_*.py
 ```
