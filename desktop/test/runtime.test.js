@@ -65,3 +65,22 @@ test("setup explains a missing Python", async () => {
     /Python 3\.11, 3\.12 or 3\.13 is needed/
   );
 });
+
+test("a failed step is named in the error", async () => {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), "vf-runtime-"));
+  const engineDir = path.join(__dirname, "..", "..");
+  const paths = {
+    engineDir,
+    runtimeVenv: path.join(userData, "runtime", "venv"),
+    requirements: [path.join(engineDir, "viewfinder", "requirements.txt")],
+  };
+  const runFn = async (command, args) => {
+    if (args.includes("-c")) return "3.12\n";
+    if (args.includes("setup")) throw new Error("python exited with 1");
+    return "";
+  };
+  await assert.rejects(
+    runtime.setupRuntime({ paths, log: () => {}, platform: "linux", env: {}, runFn }),
+    /^Error: Downloading the models \(~9 GB, once\) failed \(python exited with 1\)\. The log below has the details\.$/
+  );
+});
